@@ -1,0 +1,21 @@
+category,path,exists,size_mb,included,description,note
+data,data/processed/feature_table_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.parquet,True,3852.416869163513,False,Feature table with labels before split metadata.,excluded large artifact
+data,data/processed/model_dataset_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.parquet,True,3856.7052841186523,False,Model dataset with chronological split metadata.,excluded large artifact
+small_result,outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_aggregate.csv,True,0.0023479461669921875,True,Final-test aggregate metrics.,small CSV
+small_result,outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_nonzero_subset.csv,True,0.001079559326171875,True,Final-test nonzero subset metrics.,small CSV
+small_result,outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_daily_blocks.csv,True,0.005091667175292969,True,Daily final-test stability metrics.,small CSV
+small_result,outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_aggregate.csv,True,0.04048633575439453,True,Train-median regime aggregate metrics.,small CSV
+small_result,outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_nonzero_subset.csv,True,0.02650737762451172,True,Train-median regime nonzero metrics.,small CSV
+small_report,outputs/reports/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_frozen_thresholds.csv,True,0.0002498626708984375,True,Frozen validation-selected thresholds.,small CSV
+small_report,outputs/reports/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_full_vs_baselines_deltas.csv,True,0.0014181137084960938,True,Final-test deltas versus baselines.,small CSV
+small_report,outputs/reports/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_thresholded_deltas.csv,True,0.0021076202392578125,True,Thresholded model deltas.,small CSV
+small_report,outputs/reports/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_thresholds.csv,True,0.000720977783203125,True,Train-median regime cutoffs.,small CSV
+diagnostic_data,outputs/results/compact_test_predictions_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.parquet,True,1154.7078666687012,False,Compact test-only probabilities and hard predictions.,excluded row-level parquet
+small_report,outputs/reports/compact_test_predictions_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_summary.csv,True,0.001033782958984375,True,Summary of compact test prediction file.,small CSV
+audit,outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v2_float64_features/audit_summary.json,True,0.005035400390625,True,Machine-readable audit summary.,small JSON
+audit,outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v2_float64_features/final_audit_conclusion.csv,True,0.0009450912475585938,True,One-row audit conclusion.,small CSV
+plot,outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_target_drift.png,True,0.057552337646484375,True,Target Drift plot.,small PNG
+plot,outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_horizon_performance.png,True,0.07448101043701172,True,Horizon Performance plot.,small PNG
+plot,outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_thresholded_vs_argmax_recall.png,True,0.05882549285888672,True,Thresholded Vs Argmax Recall plot.,small PNG
+plot,outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_performance.png,True,0.09420967102050781,True,Regime Performance plot.,small PNG
+plot,outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_nonzero_performance.png,True,0.053969383239746094,True,Nonzero Performance plot.,small PNG

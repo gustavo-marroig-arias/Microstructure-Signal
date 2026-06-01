@@ -1,0 +1,4 @@
+model,horizon,threshold_down,threshold_up,threshold_source
+full_logistic_thresholded,10,0.175,0.2,validation_selected_macro_f1
+full_logistic_thresholded,20,0.225,0.25,validation_selected_macro_f1
+full_logistic_thresholded,50,0.3,0.3,validation_selected_macro_f1

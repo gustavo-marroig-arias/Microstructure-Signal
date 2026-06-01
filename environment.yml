@@ -1,0 +1,14 @@
+name: quant_env
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.12
+  - pip
+  - pip:
+      - matplotlib==3.10.6
+      - numpy==2.3.5
+      - pandas==2.3.3
+      - pyarrow==24.0.0
+      - requests==2.32.5
+      - scikit-learn==1.7.2
+      - tqdm==4.67.3
