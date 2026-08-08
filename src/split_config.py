@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.protocol import DEFAULT_HORIZONS
+
 
 @dataclass(frozen=True)
 class ChronologicalSplitConfig:
@@ -22,6 +24,27 @@ class ChronologicalSplitConfig:
     train_fraction: float = 0.60
     validation_fraction: float = 0.20
     boundary_drop_events: int = 50
+
+    def __post_init__(self) -> None:
+        if not 0.0 < self.train_fraction < 1.0:
+            raise ValueError("train_fraction must be strictly between 0 and 1.")
+        if not 0.0 < self.validation_fraction < 1.0:
+            raise ValueError(
+                "validation_fraction must be strictly between 0 and 1."
+            )
+        if self.train_fraction + self.validation_fraction >= 1.0:
+            raise ValueError(
+                "train_fraction + validation_fraction must be strictly below 1."
+            )
+        maximum_horizon = max(DEFAULT_HORIZONS)
+        if self.boundary_drop_events < maximum_horizon:
+            raise ValueError(
+                "boundary_drop_events must cover the maximum protocol horizon "
+                f"({maximum_horizon})."
+            )
+
+
+DEFAULT_SPLIT_CONFIG = ChronologicalSplitConfig()
 
 
 def validate_feature_table(feature_table: pd.DataFrame) -> None:
@@ -66,6 +89,15 @@ def validate_feature_table(feature_table: pd.DataFrame) -> None:
     label_cols = ["y_10", "y_20", "y_50"]
     if feature_table[label_cols].isna().any().any():
         raise ValueError("label columns contain missing values.")
+    invalid_labels = {
+        col: sorted(
+            set(feature_table[col].unique()) - {-1, 0, 1}
+        )
+        for col in label_cols
+        if not set(feature_table[col].unique()).issubset({-1, 0, 1})
+    }
+    if invalid_labels:
+        raise ValueError(f"label columns contain invalid values: {invalid_labels}")
 
 
 def sample_window_from_dates(start: str, end: str) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -92,16 +124,13 @@ def sample_window_from_dates(start: str, end: str) -> tuple[pd.Timestamp, pd.Tim
 def compute_time_boundaries(
     start: str,
     end: str,
-    config: ChronologicalSplitConfig = ChronologicalSplitConfig(),
+    config: ChronologicalSplitConfig = DEFAULT_SPLIT_CONFIG,
 ) -> dict:
     """
     Computes timestamp split boundaries from the full sample time window.
 
     This avoids splitting by model-filtered row count.
     """
-    if config.train_fraction + config.validation_fraction >= 1.0:
-        raise ValueError("train_fraction + validation_fraction must be < 1.0")
-    
     sample_start, sample_end_exclusive = sample_window_from_dates(start, end)
 
     total_duration = sample_end_exclusive - sample_start
@@ -124,7 +153,7 @@ def assign_chronological_split(
     feature_table: pd.DataFrame,
     start: str,
     end: str,
-    config: ChronologicalSplitConfig = ChronologicalSplitConfig(),
+    config: ChronologicalSplitConfig = DEFAULT_SPLIT_CONFIG,
 ) -> pd.DataFrame:
     """
     Assigns train / validation / test split based on event timestamp.
@@ -174,7 +203,7 @@ def assign_chronological_split(
 
 def mark_boundary_drops(
     split_table: pd.DataFrame,
-    config: ChronologicalSplitConfig = ChronologicalSplitConfig(),
+    config: ChronologicalSplitConfig = DEFAULT_SPLIT_CONFIG,
 ) -> pd.DataFrame:
     """
     Marks the last N labeled observations of train and validation as boundary drops.
@@ -196,15 +225,13 @@ def mark_boundary_drops(
         if len(split_idx) == 0:
             raise ValueError(f"No rows found for split: {split_name}")
 
-        n_drop = min(config.boundary_drop_events, len(split_idx))
-
-        if n_drop < config.boundary_drop_events:
-            print(
-                f"Warning: split {split_name} has only {len(split_idx)} rows; "
-                f"marking {n_drop} rows as boundary drops."
+        if len(split_idx) < config.boundary_drop_events:
+            raise ValueError(
+                f"Split {split_name!r} contains {len(split_idx)} rows, fewer "
+                f"than the required {config.boundary_drop_events}-event "
+                "label embargo."
             )
-
-        drop_idx = split_idx[-n_drop:]
+        drop_idx = split_idx[-config.boundary_drop_events:]
 
         out.loc[drop_idx, "is_boundary_drop"] = True
 
@@ -233,7 +260,7 @@ def build_model_dataset(
     feature_table: pd.DataFrame,
     start: str,
     end: str,
-    config: ChronologicalSplitConfig = ChronologicalSplitConfig(),
+    config: ChronologicalSplitConfig = DEFAULT_SPLIT_CONFIG,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Full split-building pipeline.

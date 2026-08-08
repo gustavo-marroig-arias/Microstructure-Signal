@@ -6,9 +6,6 @@ import numpy as np
 import pandas as pd
 
 
-TERNARY_LABELS = (-1, 0, 1)
-
-
 @dataclass(frozen=True)
 class RegimeSpec:
     regime_variable: str
@@ -44,6 +41,69 @@ def validate_regime_columns(data: pd.DataFrame) -> None:
 
     if missing:
         raise ValueError(f"Missing regime feature columns: {missing}")
+    if data.empty:
+        raise ValueError("Regime data must not be empty.")
+    for spec in REGIME_SPECS:
+        values = data[spec.feature]
+        if not pd.api.types.is_numeric_dtype(values):
+            raise TypeError(f"Regime feature must be numeric: {spec.feature}")
+        if values.isna().any() or not bool(
+            np.isfinite(values.to_numpy(copy=False)).all()
+        ):
+            raise ValueError(
+                f"Regime feature contains missing/non-finite values: "
+                f"{spec.feature}"
+            )
+
+
+def validate_regime_thresholds(thresholds: pd.DataFrame) -> None:
+    required = {
+        "regime_variable",
+        "feature",
+        "threshold_source",
+        "threshold_value",
+        "lower_regime",
+        "lower_rule",
+        "upper_regime",
+        "upper_rule",
+    }
+    missing = sorted(required - set(thresholds.columns))
+    if missing:
+        raise ValueError(f"Regime thresholds are missing columns: {missing}")
+    if len(thresholds) != len(REGIME_SPECS):
+        raise ValueError(
+            f"Expected {len(REGIME_SPECS)} regime thresholds, "
+            f"found {len(thresholds)}."
+        )
+
+    rows_by_feature = thresholds.set_index("feature", verify_integrity=True)
+    if set(rows_by_feature.index) != {spec.feature for spec in REGIME_SPECS}:
+        raise ValueError("Regime threshold features differ from the protocol.")
+
+    for spec in REGIME_SPECS:
+        row = rows_by_feature.loc[spec.feature]
+        expected = {
+            "regime_variable": spec.regime_variable,
+            "threshold_source": "train_median",
+            "lower_regime": spec.lower_label,
+            "lower_rule": "<= train_median",
+            "upper_regime": spec.upper_label,
+            "upper_rule": "> train_median",
+        }
+        mismatched = [
+            column
+            for column, value in expected.items()
+            if row[column] != value
+        ]
+        if mismatched:
+            raise ValueError(
+                f"Regime threshold metadata differs for {spec.feature}: "
+                f"{mismatched}"
+            )
+        if not np.isfinite(float(row["threshold_value"])):
+            raise ValueError(
+                f"Regime threshold is non-finite: {spec.feature}"
+            )
 
 
 def training_regime_thresholds(train: pd.DataFrame) -> pd.DataFrame:
@@ -87,7 +147,9 @@ def training_regime_thresholds(train: pd.DataFrame) -> pd.DataFrame:
             }
         )
 
-    return pd.DataFrame(rows)
+    thresholds = pd.DataFrame(rows)
+    validate_regime_thresholds(thresholds)
+    return thresholds
 
 
 def _confusion_counts(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
@@ -159,7 +221,7 @@ def aggregate_metric_row_fast(
         "n_obs": n_obs,
         "accuracy": float(diag.sum() / n_obs),
         "macro_f1": float(f1.mean()),
-        "balanced_accuracy": float(recall.mean()),
+        "balanced_accuracy": float(recall[row_sum > 0].mean()),
         "pred_down_fraction": float(pred_counts[0] / n_obs),
         "pred_unchanged_fraction": float(pred_counts[1] / n_obs),
         "pred_up_fraction": float(pred_counts[2] / n_obs),
@@ -266,6 +328,7 @@ def evaluate_regime_predictions(
     validation/test. This function does not estimate thresholds from `data`.
     """
     validate_regime_columns(data)
+    validate_regime_thresholds(thresholds)
 
     label_col = f"y_{horizon}"
     if label_col not in data.columns:

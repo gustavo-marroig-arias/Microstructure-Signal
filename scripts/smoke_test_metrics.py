@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,13 @@ def main() -> None:
         horizon=10,
         model_name="smoke_test",
     )
+    aggregate = result["aggregate"].iloc[0]
+    assert np.isclose(aggregate["accuracy"], 4 / 7)
+    assert np.isclose(aggregate["macro_f1"], 5 / 9)
+    assert np.isclose(aggregate["balanced_accuracy"], 5 / 9)
+    assert int(result["confusion_counts"]["value"].sum()) == len(y_true)
+    assert int(nonzero.loc[0, "n_nonzero_obs"]) == 5
+    assert np.isclose(nonzero.loc[0, "nonzero_accuracy"], 0.6)
 
     print("=" * 80)
     print("AGGREGATE")

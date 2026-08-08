@@ -1,0 +1,6 @@
+plot,path
+target_drift,outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_target_drift.png
+horizon_performance,outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_horizon_performance.png
+thresholded_vs_argmax_recall,outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_thresholded_vs_argmax_recall.png
+nonzero_performance,outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_nonzero_performance.png
+regime_performance,outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_performance.png

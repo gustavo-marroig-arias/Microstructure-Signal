@@ -12,6 +12,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.artifact_naming import tagged_artifact_stem  # noqa: E402
 from src.data_loader import parse_date  # noqa: E402
+from src.model_dataset_io import resolve_model_dataset  # noqa: E402
+from src.protocol import validate_protocol_symbol  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,20 +26,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--artifact-tag",
         default=None,
-        help="Optional filename tag, e.g. 'v2_float64_features'.",
+        help="Optional filename tag, e.g. 'v3_fixed_window_features'.",
     )
     parser.add_argument(
         "--output-prefix",
         default="current_result_manifest",
         help="Output basename under outputs/reports.",
     )
+    parser.add_argument(
+        "--include-regime-artifacts",
+        action="store_true",
+        help=(
+            "Include regime tables/plot only after they have been regenerated "
+            "from complete frozen model artifacts."
+        ),
+    )
     return parser.parse_args()
 
 
-def file_size_mb(path: Path) -> float | None:
+def artifact_size_mb(path: Path) -> float | None:
     if not path.exists():
         return None
-    return path.stat().st_size / (1024 * 1024)
+    if path.is_dir():
+        size_bytes = sum(
+            child.stat().st_size
+            for child in path.rglob("*")
+            if child.is_file()
+        )
+    else:
+        size_bytes = path.stat().st_size
+    return size_bytes / (1024 * 1024)
 
 
 def add_file(
@@ -54,7 +72,7 @@ def add_file(
             "category": category,
             "path": str(path.relative_to(PROJECT_ROOT)),
             "exists": path.exists(),
-            "size_mb": file_size_mb(path),
+            "size_mb": artifact_size_mb(path),
             "included": included,
             "description": description,
             "note": note,
@@ -67,6 +85,26 @@ def load_audit_summary(audit_path: Path) -> dict:
         return {}
     with audit_path.open() as f:
         return json.load(f)
+
+
+def validate_regime_artifacts(regime_path: Path) -> None:
+    if not regime_path.exists():
+        raise FileNotFoundError(
+            f"Missing regime aggregate table: {regime_path}"
+        )
+    columns = set(pd.read_csv(regime_path, nrows=1).columns)
+    required = {
+        "dataset_sha256",
+        "experiment_fingerprint",
+        "model_created_utc",
+        "model_parameter_fingerprint",
+    }
+    missing = sorted(required - columns)
+    if missing:
+        raise ValueError(
+            "Regime artifacts cannot be included without required "
+            f"frozen-artifact provenance columns: {missing}"
+        )
 
 
 def markdown_manifest(
@@ -119,6 +157,9 @@ def markdown_manifest(
             "",
             "## File Manifest",
             "",
+            "`Exists` records the generation machine at manifest creation; only rows",
+            "marked `yes` under `Included?` belong to the public snapshot.",
+            "",
             *table_lines,
             "",
             "## Artifact Policy",
@@ -135,8 +176,7 @@ def markdown_manifest(
 def main() -> None:
     args = parse_args()
 
-    if args.symbol != "BTCUSDT":
-        raise ValueError("Protocol violation: symbol must remain BTCUSDT.")
+    validate_protocol_symbol(args.symbol)
 
     start_str = parse_date(args.start).strftime("%Y-%m-%d")
     end_str = parse_date(args.end).strftime("%Y-%m-%d")
@@ -161,6 +201,10 @@ def main() -> None:
         end_str,
         args.artifact_tag,
     )
+    model_dataset_path = resolve_model_dataset(
+        processed_dir,
+        dataset_stem,
+    ).path
     final_prefix = tagged_artifact_stem(
         "final_test",
         args.symbol,
@@ -188,6 +232,10 @@ def main() -> None:
         else f"{args.symbol}_{start_str}_to_{end_str}"
     )
     audit_path = audit_dir / "audit_summary.json"
+    if args.include_regime_artifacts:
+        validate_regime_artifacts(
+            results_dir / f"{final_prefix}_regime_aggregate.csv"
+        )
 
     rows: list[dict] = []
     add_file(
@@ -200,7 +248,7 @@ def main() -> None:
     )
     add_file(
         rows,
-        path=processed_dir / f"{dataset_stem}.parquet",
+        path=model_dataset_path,
         category="data",
         description="Model dataset with chronological split metadata.",
         included=False,
@@ -209,10 +257,17 @@ def main() -> None:
 
     for suffix, description in [
         ("aggregate.csv", "Final-test aggregate metrics."),
-        ("nonzero_subset.csv", "Final-test nonzero subset metrics."),
+        ("class_proportions.csv", "Final-test true and predicted class proportions."),
+        ("confusion_counts.csv", "Final-test confusion counts."),
+        (
+            "confusion_true_normalized.csv",
+            "Final-test row-normalized confusion matrices.",
+        ),
         ("daily_blocks.csv", "Daily final-test stability metrics."),
-        ("regime_aggregate.csv", "Train-median regime aggregate metrics."),
-        ("regime_nonzero_subset.csv", "Train-median regime nonzero metrics."),
+        ("logistic_coefficients.csv", "Frozen full-model coefficients."),
+        ("majority_fit_summary.csv", "Train-fitted majority classes."),
+        ("nonzero_subset.csv", "Final-test nonzero subset metrics."),
+        ("per_class.csv", "Final-test per-class metrics."),
     ]:
         add_file(
             rows,
@@ -222,12 +277,29 @@ def main() -> None:
             included=True,
             note="small CSV",
         )
+    for suffix, description in [
+        ("regime_aggregate.csv", "Train-median regime aggregate metrics."),
+        ("regime_nonzero_subset.csv", "Train-median regime nonzero metrics."),
+    ]:
+        add_file(
+            rows,
+            path=results_dir / f"{final_prefix}_{suffix}",
+            category="small_result",
+            description=description,
+            included=args.include_regime_artifacts,
+            note=(
+                "small CSV"
+                if args.include_regime_artifacts
+                else "excluded unless frozen-model provenance is available"
+            ),
+        )
 
     for suffix, description in [
         ("frozen_thresholds.csv", "Frozen validation-selected thresholds."),
         ("full_vs_baselines_deltas.csv", "Final-test deltas versus baselines."),
+        ("ranking.csv", "Final-test model ranking."),
+        ("signal_decay.csv", "Final-test performance by prediction horizon."),
         ("thresholded_deltas.csv", "Thresholded model deltas."),
-        ("regime_thresholds.csv", "Train-median regime cutoffs."),
     ]:
         add_file(
             rows,
@@ -237,6 +309,18 @@ def main() -> None:
             included=True,
             note="small CSV",
         )
+    add_file(
+        rows,
+        path=reports_dir / f"{final_prefix}_regime_thresholds.csv",
+        category="small_report",
+        description="Train-median regime cutoffs.",
+        included=args.include_regime_artifacts,
+        note=(
+            "small CSV"
+            if args.include_regime_artifacts
+            else "excluded unless frozen-model provenance is available"
+        ),
+    )
 
     add_file(
         rows,
@@ -254,6 +338,27 @@ def main() -> None:
         included=True,
         note="small CSV",
     )
+    for prefix, description in [
+        ("feature_summary", "Feature completeness and distribution summary."),
+        ("label_distribution", "Full-sample label distribution."),
+        ("split_summary", "Chronological split boundaries and row counts."),
+        ("target_diagnostics", "Split-specific target distributions."),
+    ]:
+        report_stem = tagged_artifact_stem(
+            prefix,
+            args.symbol,
+            start_str,
+            end_str,
+            args.artifact_tag,
+        )
+        add_file(
+            rows,
+            path=reports_dir / f"{report_stem}.csv",
+            category="small_report",
+            description=description,
+            included=True,
+            note="small CSV",
+        )
     add_file(
         rows,
         path=audit_path,
@@ -275,7 +380,6 @@ def main() -> None:
         "target_drift",
         "horizon_performance",
         "thresholded_vs_argmax_recall",
-        "regime_performance",
         "nonzero_performance",
     ]:
         add_file(
@@ -286,6 +390,26 @@ def main() -> None:
             included=True,
             note="small PNG",
         )
+    add_file(
+        rows,
+        path=reports_dir / "plots" / f"{plot_prefix}_regime_performance.png",
+        category="plot",
+        description="Regime Performance plot.",
+        included=args.include_regime_artifacts,
+        note=(
+            "small PNG"
+            if args.include_regime_artifacts
+            else "excluded unless required regime provenance is available"
+        ),
+    )
+    add_file(
+        rows,
+        path=reports_dir / "plots" / f"{plot_prefix}_manifest.csv",
+        category="plot",
+        description="Plot source and output manifest.",
+        included=True,
+        note="small CSV",
+    )
 
     reports_dir.mkdir(parents=True, exist_ok=True)
     csv_path = reports_dir / f"{args.output_prefix}.csv"

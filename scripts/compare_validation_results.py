@@ -18,8 +18,9 @@ from src.evaluation.model_comparison import (  # noqa: E402
     validation_nonzero_comparison_table,
     validation_ranking_table,
 )
-from src.data_loader import parse_date # noqa: E402
+from src.data_loader import parse_date  # noqa: E402
 from src.artifact_naming import tagged_artifact_stem  # noqa: E402
+from src.protocol import validate_protocol_symbol  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional filename tag inserted after the artifact kind, e.g. "
-            "'v2_float64_features'."
+            "'v3_fixed_window_features'."
         ),
     )
 
@@ -59,8 +60,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if args.symbol != "BTCUSDT":
-        raise ValueError("Protocol violation: symbol must remain BTCUSDT.")
+    validate_protocol_symbol(args.symbol)
     
     start_str = parse_date(args.start).strftime("%Y-%m-%d")
     end_str = parse_date(args.end).strftime("%Y-%m-%d")

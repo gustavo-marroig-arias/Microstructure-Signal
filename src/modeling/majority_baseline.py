@@ -6,8 +6,7 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-
-TERNARY_LABELS = [-1, 0, 1]
+from src.protocol import TERNARY_LABELS
 
 
 @dataclass
@@ -22,7 +21,7 @@ class MajorityClassPredictor:
 
     Tie-breaking rule:
         if two or more classes are tied, choose the first according to
-        TERNARY_LABELS = [-1, 0, 1].
+        TERNARY_LABELS = (-1, 0, 1).
     """
     majority_class_: int | None = None
     class_counts_: dict[int, int] | None = None

@@ -8,31 +8,22 @@ preserving float64 precision for the log-return path used by `mid_return_5` and
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import gc
 import numpy as np
 import pandas as pd
 
-
-DEFAULT_HORIZONS = (10, 20, 50)
-
-FEATURE_COLUMNS = [
-    "relative_spread",
-    "queue_imbalance",
-    "log_bid_size",
-    "log_ask_size",
-    "delta_bid_size",
-    "delta_ask_size",
-    "mid_return_5",
-    "realized_vol_20",
-    "trade_intensity_1s",
-    "signed_trade_count_imbalance_1s",
-    "signed_trade_volume_imbalance_1s",
-]
+from src.protocol import DEFAULT_HORIZONS, FEATURE_COLUMNS, TERNARY_LABELS
 
 
-def validate_events(events: pd.DataFrame) -> None:
+
+def validate_events(
+    events: pd.DataFrame,
+    *,
+    require_zero_based: bool = True,
+) -> None:
     required = [
         "event_id",
         "timestamp",
@@ -46,29 +37,28 @@ def validate_events(events: pd.DataFrame) -> None:
     if missing:
         raise ValueError(f"events missing required columns: {missing}")
 
-    if not events["event_id"].is_monotonic_increasing:
-        raise ValueError("event_id must be monotonic increasing.")
+    if events.empty:
+        raise ValueError("events must not be empty.")
+    if events["timestamp"].isna().any():
+        raise ValueError("timestamp contains missing values.")
+
+    event_ids = events["event_id"].to_numpy(dtype=np.int64, copy=False)
+    if len(event_ids) > 1 and not bool(np.all(np.diff(event_ids) == 1)):
+        raise ValueError("event_id must be strictly contiguous.")
 
     if not events["timestamp"].is_monotonic_increasing:
         raise ValueError("timestamp must be monotonic increasing.")
 
-    if events["event_id"].iloc[0] != 0:
+    if require_zero_based and event_ids[0] != 0:
         raise ValueError("event_id must start at 0.")
 
-    if events["event_id"].iloc[-1] != len(events) - 1:
+    if require_zero_based and event_ids[-1] != len(events) - 1:
         raise ValueError("event_id must end at len(events) - 1.")
 
-    if not (events["bid_price"] > 0).all():
-        raise ValueError("bid_price must be positive.")
-
-    if not (events["ask_price"] > 0).all():
-        raise ValueError("ask_price must be positive.")
-
-    if not (events["bid_size"] > 0).all():
-        raise ValueError("bid_size must be positive.")
-
-    if not (events["ask_size"] > 0).all():
-        raise ValueError("ask_size must be positive.")
+    for column in ("bid_price", "ask_price", "bid_size", "ask_size"):
+        values = events[column].to_numpy(dtype=np.float64, copy=False)
+        if not bool(np.isfinite(values).all()) or not bool((values > 0).all()):
+            raise ValueError(f"{column} must be finite and positive.")
 
     if not (events["ask_price"] >= events["bid_price"]).all():
         raise ValueError("ask_price must be >= bid_price.")
@@ -85,19 +75,110 @@ def validate_trades(trades: pd.DataFrame) -> None:
     if missing:
         raise ValueError(f"trades missing required columns: {missing}")
 
+    if trades.empty:
+        raise ValueError("trades must not be empty.")
+
+    if trades["timestamp"].isna().any():
+        raise ValueError("trade timestamp contains missing values.")
+
     if not trades["timestamp"].is_monotonic_increasing:
         trades.sort_values("timestamp", kind="mergesort", inplace=True)
         trades.reset_index(drop=True, inplace=True)
 
-    if not (trades["quantity"] > 0).all():
-        raise ValueError("trade quantity must be positive.")
+    quantity = trades["quantity"].to_numpy(dtype=np.float64, copy=False)
+    if not bool(np.isfinite(quantity).all()) or not bool((quantity > 0).all()):
+        raise ValueError("trade quantity must be finite and positive.")
 
     if trades["buyer_is_maker"].isna().any():
         raise ValueError("buyer_is_maker contains missing values.")
+    if not pd.api.types.is_bool_dtype(trades["buyer_is_maker"]):
+        raise TypeError("buyer_is_maker must have boolean dtype.")
 
 
 def _timestamp_to_int64_ns(timestamp_series: pd.Series) -> np.ndarray:
     return timestamp_series.astype("int64").to_numpy(copy=False)
+
+
+@dataclass(frozen=True)
+class TradeFlowIndex:
+    """Immutable prefix-sum index for repeated event-window trade queries."""
+
+    trade_time_ns: np.ndarray
+    prefix_signed_count: np.ndarray
+    prefix_volume: np.ndarray
+    prefix_signed_volume: np.ndarray
+    first_trade_timestamp: pd.Timestamp
+
+    @classmethod
+    def from_trades(
+        cls,
+        trades: pd.DataFrame,
+        *,
+        first_trade_timestamp: pd.Timestamp | None = None,
+    ) -> "TradeFlowIndex":
+        validate_trades(trades)
+        trade_time_ns = _timestamp_to_int64_ns(trades["timestamp"])
+        quantity = trades["quantity"].to_numpy(dtype=np.float64, copy=True)
+        trade_sign = np.where(
+            trades["buyer_is_maker"].to_numpy(copy=False),
+            -1.0,
+            1.0,
+        )
+        observed_first = pd.Timestamp(trades["timestamp"].iloc[0])
+        global_first = (
+            observed_first
+            if first_trade_timestamp is None
+            else pd.Timestamp(first_trade_timestamp)
+        )
+        if global_first > observed_first:
+            raise ValueError(
+                "first_trade_timestamp cannot be later than the first "
+                "trade represented by the index."
+            )
+        return cls(
+            trade_time_ns=trade_time_ns,
+            prefix_signed_count=np.concatenate(
+                ([0.0], np.cumsum(trade_sign, dtype=np.float64))
+            ),
+            prefix_volume=np.concatenate(
+                ([0.0], np.cumsum(quantity, dtype=np.float64))
+            ),
+            prefix_signed_volume=np.concatenate(
+                ([0.0], np.cumsum(trade_sign * quantity, dtype=np.float64))
+            ),
+            first_trade_timestamp=global_first,
+        )
+
+    @classmethod
+    def empty(cls, first_trade_timestamp: pd.Timestamp) -> "TradeFlowIndex":
+        return cls(
+            trade_time_ns=np.empty(0, dtype=np.int64),
+            prefix_signed_count=np.zeros(1, dtype=np.float64),
+            prefix_volume=np.zeros(1, dtype=np.float64),
+            prefix_signed_volume=np.zeros(1, dtype=np.float64),
+            first_trade_timestamp=pd.Timestamp(first_trade_timestamp),
+        )
+
+    def __post_init__(self) -> None:
+        n_trades = len(self.trade_time_ns)
+        expected_prefix_length = n_trades + 1
+        for name in (
+            "prefix_signed_count",
+            "prefix_volume",
+            "prefix_signed_volume",
+        ):
+            values = getattr(self, name)
+            if len(values) != expected_prefix_length:
+                raise ValueError(
+                    f"{name} has length {len(values)}, "
+                    f"expected {expected_prefix_length}."
+                )
+            if not np.isfinite(values).all():
+                raise ValueError(f"{name} contains non-finite values.")
+        if len(self.trade_time_ns) > 1 and not bool(
+            np.all(np.diff(self.trade_time_ns) >= 0)
+        ):
+            raise ValueError("trade_time_ns must be monotone.")
 
 
 def build_labels_from_midprice(
@@ -109,6 +190,16 @@ def build_labels_from_midprice(
 
     Does not materialize future_midprice_h or midprice_change_h columns.
     """
+    if not horizons:
+        raise ValueError("horizons must not be empty.")
+    if tuple(sorted(set(horizons))) != horizons:
+        raise ValueError("horizons must be positive, unique, and sorted.")
+    if any(horizon <= 0 for horizon in horizons):
+        raise ValueError("horizons must be positive.")
+    if not bool(np.isfinite(midprice).all()) or not bool(
+        (midprice > 0).all()
+    ):
+        raise ValueError("midprice must be finite and positive.")
     max_horizon = max(horizons)
 
     if len(midprice) <= max_horizon:
@@ -144,7 +235,8 @@ def build_quote_feature_arrays(
     - keeps most quote features as float32 for memory efficiency
     - stores mid_return_5 and realized_vol_20 as float64
     - avoids unnecessary full-length temporary arrays
-    - computes realized_vol_20 with cumulative sums on float64 log returns
+    - computes realized_vol_20 from fixed 20-return windows so chunking does
+      not change floating-point accumulation history
     """
     features: dict[str, np.ndarray] = {}
 
@@ -294,19 +386,10 @@ def build_quote_feature_arrays(
 
         squared_returns *= squared_returns
 
-        cumulative = np.empty(n_keep, dtype=np.float64)
-        cumulative[0] = 0.0
-
-        np.cumsum(
+        realized_vol_20[20:] = np.convolve(
             squared_returns,
-            dtype=np.float64,
-            out=cumulative[1:],
-        )
-
-        np.subtract(
-            cumulative[20:],
-            cumulative[:-20],
-            out=realized_vol_20[20:],
+            np.ones(20, dtype=np.float64),
+            mode="valid",
         )
 
         np.sqrt(
@@ -314,7 +397,7 @@ def build_quote_feature_arrays(
             out=realized_vol_20[20:],
         )
 
-        del squared_returns, cumulative
+        del squared_returns
 
     features["realized_vol_20"] = realized_vol_20
 
@@ -324,10 +407,11 @@ def build_quote_feature_arrays(
 
 def build_trade_flow_feature_arrays(
     event_timestamps: pd.Series,
-    trades: pd.DataFrame,
+    trades: pd.DataFrame | None,
     n_keep: int,
     window_ms: int = 1000,
     chunk_size: int = 5_000_000,
+    trade_index: TradeFlowIndex | None = None,
 ) -> tuple[dict[str, np.ndarray], np.ndarray]:
     """
     Builds 1-second trade-flow features as arrays.
@@ -338,27 +422,18 @@ def build_trade_flow_feature_arrays(
     Trades exactly at event_timestamp are excluded.
     If no trades are in the window, imbalances are set to zero.
     """
-    validate_trades(trades)
+    if trade_index is None:
+        if trades is None:
+            raise ValueError("trades is required when trade_index is not supplied.")
+        trade_index = TradeFlowIndex.from_trades(trades)
+    if n_keep <= 0 or n_keep > len(event_timestamps):
+        raise ValueError("n_keep must be within event_timestamps.")
+    if window_ms <= 0:
+        raise ValueError("window_ms must be positive.")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive.")
 
     event_time_ns = _timestamp_to_int64_ns(event_timestamps.iloc[:n_keep])
-
-    trade_time_ns = _timestamp_to_int64_ns(trades["timestamp"])
-
-    quantity = trades["quantity"].astype("float64").to_numpy(copy=False)
-
-    # buyer_is_maker == False => buyer aggressor => +1
-    # buyer_is_maker == True  => seller aggressor => -1
-    trade_sign = np.where(trades["buyer_is_maker"].to_numpy(copy=False), -1.0, 1.0)
-
-    signed_count = trade_sign
-    signed_volume = trade_sign * quantity
-
-    n_trades = len(trades)
-
-    prefix_count = np.arange(n_trades + 1, dtype=np.float64)
-    prefix_signed_count = np.concatenate([[0.0], np.cumsum(signed_count)])
-    prefix_volume = np.concatenate([[0.0], np.cumsum(quantity)])
-    prefix_signed_volume = np.concatenate([[0.0], np.cumsum(signed_volume)])
 
     trade_intensity = np.empty(n_keep, dtype=np.int32)
     signed_count_imbalance = np.empty(n_keep, dtype=np.float32)
@@ -372,14 +447,34 @@ def build_trade_flow_feature_arrays(
         event_chunk = event_time_ns[start:stop]
         lower_bound = event_chunk - window_ns
 
-        left_idx = np.searchsorted(trade_time_ns, lower_bound, side="right")
-        right_idx = np.searchsorted(trade_time_ns, event_chunk, side="left")
+        left_idx = np.searchsorted(
+            trade_index.trade_time_ns,
+            lower_bound,
+            side="right",
+        )
+        right_idx = np.searchsorted(
+            trade_index.trade_time_ns,
+            event_chunk,
+            side="left",
+        )
 
-        count = prefix_count[right_idx] - prefix_count[left_idx]
-        signed_count_sum = prefix_signed_count[right_idx] - prefix_signed_count[left_idx]
-
-        total_volume = prefix_volume[right_idx] - prefix_volume[left_idx]
-        signed_volume_sum = prefix_signed_volume[right_idx] - prefix_signed_volume[left_idx]
+        count = right_idx - left_idx
+        if bool((count > np.iinfo(np.int32).max).any()):
+            raise OverflowError(
+                "trade_intensity_1s exceeds int32 storage capacity."
+            )
+        signed_count_sum = (
+            trade_index.prefix_signed_count[right_idx]
+            - trade_index.prefix_signed_count[left_idx]
+        )
+        total_volume = (
+            trade_index.prefix_volume[right_idx]
+            - trade_index.prefix_volume[left_idx]
+        )
+        signed_volume_sum = (
+            trade_index.prefix_signed_volume[right_idx]
+            - trade_index.prefix_signed_volume[left_idx]
+        )
 
         with np.errstate(divide="ignore", invalid="ignore"):
             count_imb = signed_count_sum / count
@@ -397,11 +492,11 @@ def build_trade_flow_feature_arrays(
 
         print(f"Processed trade-flow features for events {start:,} to {stop:,}")
 
-    first_trade_ts = trades["timestamp"].min()
     lookback = pd.Timedelta(milliseconds=window_ms)
 
     has_full_trade_lookback = (
-        event_timestamps.iloc[:n_keep].reset_index(drop=True) - lookback >= first_trade_ts
+        event_timestamps.iloc[:n_keep].reset_index(drop=True) - lookback
+        >= trade_index.first_trade_timestamp
     ).to_numpy(dtype=bool)
 
     features = {
@@ -415,9 +510,12 @@ def build_trade_flow_feature_arrays(
 
 def build_feature_table(
     events: pd.DataFrame,
-    trades: pd.DataFrame,
+    trades: pd.DataFrame | None,
     horizons: tuple[int, ...] = DEFAULT_HORIZONS,
     trade_lookback_ms: int = 1000,
+    *,
+    trade_index: TradeFlowIndex | None = None,
+    require_zero_based_event_ids: bool = True,
 ) -> pd.DataFrame:
     """
     Builds a memory-lean model feature table with float64 log-return features.
@@ -432,7 +530,7 @@ def build_feature_table(
 
     This deliberately does not store future_midprice or midprice_change columns.
     """
-    validate_events(events)
+    validate_events(events, require_zero_based=require_zero_based_event_ids)
 
     print("Preparing NumPy arrays...")
 
@@ -444,7 +542,10 @@ def build_feature_table(
     bid_size = events["bid_size"].to_numpy(copy=False)
     ask_size = events["ask_size"].to_numpy(copy=False)
 
-    midprice = ((bid_price + ask_price) / 2.0).astype(np.float64)
+    midprice = (
+        bid_price.astype(np.float64, copy=False)
+        + ask_price.astype(np.float64, copy=False)
+    ) * 0.5
 
     print("Building lean labels...")
     labels, n_keep = build_labels_from_midprice(midprice, horizons=horizons)
@@ -469,6 +570,7 @@ def build_feature_table(
         trades=trades,
         n_keep=n_keep,
         window_ms=trade_lookback_ms,
+        trade_index=trade_index,
     )
 
     print("Combining output table...")
@@ -489,7 +591,7 @@ def build_feature_table(
     for col in FEATURE_COLUMNS:
         values = data[col]
         if np.issubdtype(values.dtype, np.floating):
-            feature_complete &= ~np.isnan(values)
+            feature_complete &= np.isfinite(values)
 
     data["feature_complete"] = feature_complete
 
@@ -517,7 +619,7 @@ def label_distribution(
             normalize=True,
         ).sort_index()
 
-        for label_value in [-1, 0, 1]:
+        for label_value in TERNARY_LABELS:
             rows.append(
                 {
                     "horizon": h,

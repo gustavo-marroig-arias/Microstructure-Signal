@@ -18,7 +18,10 @@ from src.feature_builder_opt_float_64 import (  # noqa: E402
     save_feature_table,
     save_label_distribution,
 )
-from src.data_loader import parse_date # noqa: E402
+from src.streaming_features import build_feature_table_streaming  # noqa: E402
+from src.data_loader import parse_date  # noqa: E402
+from src.protocol import ExperimentSpec, validate_protocol_symbol  # noqa: E402
+from src.run_provenance import RunRecorder  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,18 +54,41 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional filename tag inserted after the artifact kind, e.g. "
-            "'v2_float64_features'."
+            "'v3_fixed_window_features'."
         ),
     )
+    parser.add_argument(
+        "--execution-mode",
+        choices=["streaming", "in-memory"],
+        default="streaming",
+        help=(
+            "Use bounded-memory quote/trade chunks by default. In-memory mode "
+            "is retained for small parity checks."
+        ),
+    )
+    parser.add_argument(
+        "--event-chunk-size",
+        type=int,
+        default=1_000_000,
+        help="Core quote events per streaming chunk.",
+    )
+    parser.add_argument(
+        "--compression",
+        default="zstd",
+        help="Parquet compression codec.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Atomically replace an existing feature table.",
+    )
+    parser.add_argument("--require-clean-git", action="store_true")
 
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-
-    if args.symbol != "BTCUSDT":
-        raise ValueError("Protocol violation: symbol must remain BTCUSDT.")
+def run(args: argparse.Namespace) -> None:
+    validate_protocol_symbol(args.symbol)
     
     start_str = parse_date(args.start).strftime("%Y-%m-%d")
     end_str = parse_date(args.end).strftime("%Y-%m-%d")
@@ -79,54 +105,6 @@ def main() -> None:
 
     if not trades_path.exists():
         raise FileNotFoundError(f"Missing trades file: {trades_path}")
-
-    print("=" * 80)
-    print("STEP 6: BUILD MEMORY-LEAN LABELS AND FLOAT64 LOG-RETURN FEATURES")
-    print("=" * 80)
-
-    event_columns = [
-        "event_id",
-        "timestamp",
-        "bid_price",
-        "ask_price",
-        "bid_size",
-        "ask_size",
-    ]
-
-    trade_columns = [
-        "timestamp",
-        "quantity",
-        "buyer_is_maker",
-    ]
-
-    print(f"Reading quote events: {events_path}")
-    events = pd.read_parquet(events_path, columns=event_columns)
-
-    print(f"Reading trades:       {trades_path}")
-    trades = pd.read_parquet(trades_path, columns=trade_columns)
-
-    print()
-    print("Event table:")
-    print(f"Rows: {len(events):,}")
-    print(f"Timestamp range: {events['timestamp'].min()} → {events['timestamp'].max()}")
-
-    print()
-    print("Trade table:")
-    print(f"Rows: {len(trades):,}")
-    print(f"Timestamp range: {trades['timestamp'].min()} → {trades['timestamp'].max()}")
-
-    print()
-    print("Building memory-lean feature table with float64 log-return features...")
-    feature_table = build_feature_table(events, trades)
-
-    print()
-    print("Feature table:")
-    print(f"Rows: {len(feature_table):,}")
-    print(f"Complete feature rows: {int(feature_table['feature_complete'].sum()):,}")
-    print(f"Incomplete feature rows: {int((~feature_table['feature_complete']).sum()):,}")
-
-    label_dist = label_distribution(feature_table)
-    feat_summary = feature_summary(feature_table)
 
     feature_stem = tagged_artifact_stem(
         "feature_table",
@@ -149,10 +127,65 @@ def main() -> None:
         end_str,
         args.artifact_tag,
     )
-
     feature_path = processed_dir / f"{feature_stem}.parquet"
     label_dist_path = reports_dir / f"{label_dist_stem}.csv"
     feature_summary_path = reports_dir / f"{feature_summary_stem}.csv"
+
+    print("=" * 80)
+    print("STEP 6: BUILD MEMORY-LEAN LABELS AND FLOAT64 LOG-RETURN FEATURES")
+    print("=" * 80)
+
+    event_columns = [
+        "event_id",
+        "timestamp",
+        "bid_price",
+        "ask_price",
+        "bid_size",
+        "ask_size",
+    ]
+
+    trade_columns = [
+        "timestamp",
+        "quantity",
+        "buyer_is_maker",
+    ]
+
+    if args.execution_mode == "streaming":
+        print(f"Streaming quote events: {events_path}")
+        print(f"Streaming trade windows: {trades_path}")
+        report = build_feature_table_streaming(
+            events_path,
+            trades_path,
+            feature_path,
+            event_chunk_size=args.event_chunk_size,
+            compression=args.compression,
+            overwrite=args.overwrite,
+        )
+        label_dist = report.label_distribution()
+        feat_summary = report.feature_summary()
+        print()
+        print(f"Feature rows: {report.rows_written:,}")
+        print(f"Complete feature rows: {report.feature_complete_rows:,}")
+        print(
+            "Incomplete feature rows: "
+            f"{report.rows_written - report.feature_complete_rows:,}"
+        )
+    else:
+        if feature_path.exists() and not args.overwrite:
+            raise FileExistsError(
+                f"Output already exists: {feature_path}. Pass --overwrite "
+                "only after verifying the target."
+            )
+        print(f"Reading quote events: {events_path}")
+        events = pd.read_parquet(events_path, columns=event_columns)
+        print(f"Reading trades:       {trades_path}")
+        trades = pd.read_parquet(trades_path, columns=trade_columns)
+        print()
+        print("Building in-memory parity path...")
+        feature_table = build_feature_table(events, trades)
+        label_dist = label_distribution(feature_table)
+        feat_summary = feature_summary(feature_table)
+        save_feature_table(feature_table, feature_path)
 
     print()
     print("Label distribution:")
@@ -163,7 +196,6 @@ def main() -> None:
     print(feat_summary.to_string(index=False))
 
     print()
-    save_feature_table(feature_table, feature_path)
     save_label_distribution(label_dist, label_dist_path)
     save_feature_summary(feat_summary, feature_summary_path)
 
@@ -172,6 +204,36 @@ def main() -> None:
     print("Labels y_10, y_20, y_50 are stored directly in the feature_table.")
     print()
     print("Done. Memory-lean labels and float64 log-return features built.")
+
+
+def main() -> None:
+    args = parse_args()
+    start_str = parse_date(args.start).strftime("%Y-%m-%d")
+    end_str = parse_date(args.end).strftime("%Y-%m-%d")
+    feature_stem = tagged_artifact_stem(
+        "feature_table",
+        args.symbol,
+        start_str,
+        end_str,
+        args.artifact_tag,
+    )
+    metadata_path = (
+        PROJECT_ROOT
+        / "outputs"
+        / "reports"
+        / "run_metadata"
+        / f"{feature_stem}.json"
+    )
+    with RunRecorder(
+        metadata_path,
+        project_root=PROJECT_ROOT,
+        stage="build_features_labels",
+        arguments=vars(args),
+        experiment_fingerprint=ExperimentSpec().fingerprint(),
+        require_clean_git=args.require_clean_git,
+    ):
+        run(args)
+    print(f"Run metadata: {metadata_path}")
 
 
 if __name__ == "__main__":

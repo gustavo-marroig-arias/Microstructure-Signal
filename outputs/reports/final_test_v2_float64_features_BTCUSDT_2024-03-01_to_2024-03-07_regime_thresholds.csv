@@ -1,4 +1,0 @@
-regime_variable,feature,threshold_source,threshold_value,lower_regime,lower_rule,upper_regime,upper_rule,train_n,train_lower_n,train_upper_n,train_lower_fraction,train_upper_fraction
-spread,relative_spread,train_median,1.6039225556596648e-06,tight_spread,<= train_median,wide_spread,> train_median,150347491,75178417,75169074,0.5000310713532293,0.4999689286467707
-realized_volatility,realized_vol_20,train_median,0.0,low_realized_volatility,<= train_median,high_realized_volatility,> train_median,150347491,132569799,17777692,0.8817559782224766,0.11824402177752338
-trade_intensity,trade_intensity_1s,train_median,16.0,low_trade_intensity,<= train_median,high_trade_intensity,> train_median,150347491,77906783,72440708,0.5181781384033871,0.4818218615966129

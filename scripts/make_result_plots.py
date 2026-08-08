@@ -15,7 +15,6 @@ import matplotlib
 matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -23,14 +22,41 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.artifact_naming import tagged_artifact_stem  # noqa: E402
 from src.data_loader import parse_date  # noqa: E402
+from src.protocol import DEFAULT_HORIZONS, validate_protocol_symbol  # noqa: E402
 
 
-HORIZONS = [10, 20, 50]
+HORIZONS = DEFAULT_HORIZONS
 MODEL_LABELS = {
     "majority_baseline": "Majority",
     "queue_imbalance_logistic": "Queue only",
     "full_logistic": "Full argmax",
     "full_logistic_thresholded": "Full thresholded",
+}
+MODEL_STYLES = {
+    "majority_baseline": {
+        "color": "#1f77b4",
+        "linestyle": "-",
+        "marker": "o",
+        "zorder": 2,
+    },
+    "queue_imbalance_logistic": {
+        "color": "#ff7f0e",
+        "linestyle": "--",
+        "marker": "x",
+        "zorder": 3,
+    },
+    "full_logistic": {
+        "color": "#2ca02c",
+        "linestyle": "-",
+        "marker": "s",
+        "zorder": 2,
+    },
+    "full_logistic_thresholded": {
+        "color": "#d62728",
+        "linestyle": "-",
+        "marker": "o",
+        "zorder": 2,
+    },
 }
 
 
@@ -44,12 +70,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--artifact-tag",
         default=None,
-        help="Optional filename tag, e.g. 'v2_float64_features'.",
+        help="Optional filename tag, e.g. 'v3_fixed_window_features'.",
     )
     parser.add_argument(
         "--output-dir",
         default=None,
         help="Optional plot output directory. Default: outputs/reports/plots.",
+    )
+    parser.add_argument(
+        "--include-regime-plot",
+        action="store_true",
+        help=(
+            "Generate the regime plot after provenance-validated regime tables "
+            "have been produced from complete frozen artifacts."
+        ),
     )
     return parser.parse_args()
 
@@ -112,9 +146,9 @@ def plot_horizon_performance(aggregate: pd.DataFrame, output_path: Path) -> None
             ax.plot(
                 model_df["horizon"],
                 model_df[metric],
-                marker="o",
                 linewidth=2.0,
                 label=MODEL_LABELS[model],
+                **MODEL_STYLES[model],
             )
 
         ax.set_title(title)
@@ -147,9 +181,9 @@ def plot_thresholded_vs_argmax_recall(per_class: pd.DataFrame, output_path: Path
             ax.plot(
                 model_df["horizon"],
                 model_df["recall"],
-                marker="o",
                 linewidth=2.0,
                 label=MODEL_LABELS[model],
+                **MODEL_STYLES[model],
             )
 
         ax.set_title(class_name)
@@ -164,6 +198,18 @@ def plot_thresholded_vs_argmax_recall(per_class: pd.DataFrame, output_path: Path
 
 
 def plot_regime_performance(regime: pd.DataFrame, output_path: Path) -> None:
+    required_provenance = {
+        "dataset_sha256",
+        "experiment_fingerprint",
+        "model_created_utc",
+        "model_parameter_fingerprint",
+    }
+    missing = sorted(required_provenance - set(regime.columns))
+    if missing:
+        raise ValueError(
+            "Regime table lacks required frozen-artifact provenance: "
+            f"{missing}"
+        )
     data = regime.loc[
         (regime["split"] == "test")
         & (regime["model"] == "full_logistic_thresholded")
@@ -191,7 +237,11 @@ def plot_regime_performance(regime: pd.DataFrame, output_path: Path) -> None:
         ax.legend(frameon=False, fontsize=8)
 
     axes[0].set_ylabel("Balanced accuracy")
-    fig.suptitle("Regime Performance: Full Thresholded Model", y=1.03)
+    fig.suptitle(
+        "Final-Test Regime Performance: Thresholded Full Model\n"
+        "Cutoffs fixed at training-set medians",
+        y=1.08,
+    )
     save_figure(fig, output_path)
 
 
@@ -211,9 +261,9 @@ def plot_nonzero_performance(nonzero: pd.DataFrame, output_path: Path) -> None:
         ax.plot(
             model_df["horizon"],
             model_df["nonzero_balanced_accuracy"],
-            marker="o",
             linewidth=2.0,
             label=MODEL_LABELS[model],
+            **MODEL_STYLES[model],
         )
 
     ax.set_title("Nonzero Subset Performance")
@@ -228,8 +278,7 @@ def plot_nonzero_performance(nonzero: pd.DataFrame, output_path: Path) -> None:
 def main() -> None:
     args = parse_args()
 
-    if args.symbol != "BTCUSDT":
-        raise ValueError("Protocol violation: symbol must remain BTCUSDT.")
+    validate_protocol_symbol(args.symbol)
 
     start_str = parse_date(args.start).strftime("%Y-%m-%d")
     end_str = parse_date(args.end).strftime("%Y-%m-%d")
@@ -267,7 +316,6 @@ def main() -> None:
     target_diag = pd.read_csv(require_file(reports_dir / f"{target_prefix}.csv"))
     aggregate = pd.read_csv(require_file(results_dir / f"{final_prefix}_aggregate.csv"))
     per_class = pd.read_csv(require_file(results_dir / f"{final_prefix}_per_class.csv"))
-    regime = pd.read_csv(require_file(results_dir / f"{final_prefix}_regime_aggregate.csv"))
     nonzero = pd.read_csv(require_file(results_dir / f"{final_prefix}_nonzero_subset.csv"))
 
     generated = [
@@ -287,16 +335,22 @@ def main() -> None:
             lambda path: plot_thresholded_vs_argmax_recall(per_class, path),
         ),
         (
-            "regime_performance",
-            plot_dir / f"{plot_prefix}_regime_performance.png",
-            lambda path: plot_regime_performance(regime, path),
-        ),
-        (
             "nonzero_performance",
             plot_dir / f"{plot_prefix}_nonzero_performance.png",
             lambda path: plot_nonzero_performance(nonzero, path),
         ),
     ]
+    if args.include_regime_plot:
+        regime = pd.read_csv(
+            require_file(results_dir / f"{final_prefix}_regime_aggregate.csv")
+        )
+        generated.append(
+            (
+                "regime_performance",
+                plot_dir / f"{plot_prefix}_regime_performance.png",
+                lambda path: plot_regime_performance(regime, path),
+            )
+        )
 
     manifest_rows = []
     for plot_name, path, plotter in generated:

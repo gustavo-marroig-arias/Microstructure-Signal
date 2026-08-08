@@ -38,6 +38,9 @@ class BinanceRawConfig:
     raw_dir: Path = DATA_DIR / "raw"           # where raw zip files go
     interim_dir: Path = DATA_DIR / "interim"  # where cleaned parquet files go
 
+
+DEFAULT_BINANCE_RAW_CONFIG = BinanceRawConfig()
+
 # HELPER: date parser
 def parse_date(value: str | date | datetime) -> date:
     """
@@ -203,7 +206,7 @@ def download_daily_data(
         data_type: str,
         start: str | date | datetime,
         end: str | date | datetime,
-        config: BinanceRawConfig = BinanceRawConfig(),
+        config: BinanceRawConfig = DEFAULT_BINANCE_RAW_CONFIG,
 ) -> list[Path]:
     """
     Downloads daily Binance files for one data type.
@@ -478,12 +481,13 @@ def load_many_zips(paths: list[Path], reader_func) -> pd.DataFrame:
 def load_raw_bookticker(
         start: str | date | datetime,
         end: str | date | datetime,
-        config: BinanceRawConfig = BinanceRawConfig(),
+        config: BinanceRawConfig = DEFAULT_BINANCE_RAW_CONFIG,
 ) -> pd.DataFrame:
     """
     Loads downloaded bookTicker zip files between start and end.
     """
     paths = []
+    missing_paths = []
 
     for day in date_range_inclusive(start, end):
         day_str = day.strftime("%Y-%m-%d")
@@ -491,7 +495,14 @@ def load_raw_bookticker(
         if path.exists():
             paths.append(path)
         else:
-            print(f"Missing local bookTicker file: {path}")
+            missing_paths.append(path)
+
+    if missing_paths:
+        formatted = "\n".join(f"- {path}" for path in missing_paths)
+        raise FileNotFoundError(
+            "Requested bookTicker sample is incomplete. Missing daily files:\n"
+            f"{formatted}"
+        )
 
     quotes = load_many_zips(paths, read_bookticker_zip)
     return filter_to_utc_date_range(quotes, start, end)
@@ -499,12 +510,13 @@ def load_raw_bookticker(
 def load_raw_aggtrades(
         start: str | date | datetime,
         end: str | date | datetime,
-        config: BinanceRawConfig = BinanceRawConfig(),
+        config: BinanceRawConfig = DEFAULT_BINANCE_RAW_CONFIG,
 ) -> pd.DataFrame:
     """
     Loads downloaded aggTrades zip files between start and end.
     """
     paths = []
+    missing_paths = []
 
     for day in date_range_inclusive(start, end):
         day_str = day.strftime("%Y-%m-%d")
@@ -512,7 +524,14 @@ def load_raw_aggtrades(
         if path.exists():
             paths.append(path)
         else:
-            print(f"Missing local aggTrades file: {path}")
+            missing_paths.append(path)
+
+    if missing_paths:
+        formatted = "\n".join(f"- {path}" for path in missing_paths)
+        raise FileNotFoundError(
+            "Requested aggTrades sample is incomplete. Missing daily files:\n"
+            f"{formatted}"
+        )
 
     trades = load_many_zips(paths, read_aggtrades_zip)
     return filter_to_utc_date_range(trades, start, end)
@@ -523,7 +542,7 @@ def save_interim_raw_tables(
         trades: pd.DataFrame,
         start: str | date | datetime,
         end: str | date | datetime,
-        config: BinanceRawConfig = BinanceRawConfig()
+        config: BinanceRawConfig = DEFAULT_BINANCE_RAW_CONFIG,
 ) -> tuple[Path, Path]:
     """
     Saves standardized raw quote/trade tables as parquet.
@@ -549,7 +568,7 @@ def save_interim_raw_tables(
 def build_raw_dataset(
     start: str | date | datetime,
     end: str | date | datetime,
-    config: BinanceRawConfig = BinanceRawConfig(),
+    config: BinanceRawConfig = DEFAULT_BINANCE_RAW_CONFIG,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     download_daily_data("bookTicker", start, end, config)
     download_daily_data("aggTrades", start, end, config)

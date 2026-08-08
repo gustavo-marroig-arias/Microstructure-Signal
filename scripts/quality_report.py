@@ -4,13 +4,15 @@ import argparse
 from pathlib import Path
 import sys
 
-import pandas as pd
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_loader import parse_date  # noqa: E402
-from src.quality_checks import combined_quality_report, save_quality_report  # noqa: E402
+from src.quality_checks import (  # noqa: E402
+    combined_quality_report_from_parquet,
+    save_quality_report,
+)
+from src.protocol import validate_protocol_symbol  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -41,8 +43,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if args.symbol != "BTCUSDT":
-        raise ValueError("Protocol violation: symbol must remain BTCUSDT.")
+    validate_protocol_symbol(args.symbol)
     
     start_str = parse_date(args.start).strftime("%Y-%m-%d")
     end_str = parse_date(args.end).strftime("%Y-%m-%d")
@@ -62,15 +63,17 @@ def main() -> None:
     print("=" * 80)
     print("STEP 3: RAW DATA QUALITY REPORT")
     print("=" * 80)
-    print(f"Reading quotes: {quotes_path}")
-    quotes = pd.read_parquet(quotes_path)
-
-    print(f"Reading trades: {trades_path}")
-    trades = pd.read_parquet(trades_path)
+    print(f"Streaming quotes: {quotes_path}")
+    print(f"Streaming trades: {trades_path}")
 
     print()
     print("Building quality report...")
-    report = combined_quality_report(quotes, trades)
+    report = combined_quality_report_from_parquet(
+        quotes_path,
+        trades_path,
+        expected_start=start_str,
+        expected_end=end_str,
+    )
 
     output_path = reports_dir / f"raw_quality_report_{args.symbol}_{start_str}_to_{end_str}.csv"
     save_quality_report(report, output_path)

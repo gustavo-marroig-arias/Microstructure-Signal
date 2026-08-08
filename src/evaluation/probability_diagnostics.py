@@ -8,9 +8,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 from src.evaluation.metrics import (
     TERNARY_LABELS,
-    aggregate_metric_row,
     confusion_matrix_table,
-    evaluate_nonzero_subset,
 )
 
 
@@ -30,8 +28,12 @@ def validate_probability_inputs(
     Validates probability diagnostic inputs.
     """
     y_true = pd.Series(y_true)
+    if y_true.empty:
+        raise ValueError("y_true must not be empty.")
+    if y_true.isna().any():
+        raise ValueError("y_true contains missing values.")
 
-    observed = set(y_true.dropna().unique())
+    observed = set(y_true.unique())
 
     if not observed.issubset(set(TERNARY_LABELS)):
         raise ValueError(f"Unexpected labels: {observed}")
@@ -316,45 +318,200 @@ def threshold_grid_results(
 
     validate_probability_inputs(y_true, probabilities)
 
+    thresholds = _validate_threshold_grid(threshold_grid)
+    y_array = y_true.to_numpy(dtype=np.int8, copy=False)
+    true_indices = y_array + 1
+    p_down = probabilities["proba_-1"].to_numpy(dtype=np.float64, copy=False)
+    p_up = probabilities["proba_1"].to_numpy(dtype=np.float64, copy=False)
+
+    base_confusion = np.zeros((3, 3), dtype=np.int64)
+    base_confusion[:, 1] = np.bincount(true_indices, minlength=3)
+
+    down_candidate = p_down > p_up
+    up_candidate = p_up >= p_down
+    down_contributions = {
+        threshold: _signal_contribution(
+            true_indices,
+            down_candidate & (p_down >= threshold),
+            prediction_index=0,
+        )
+        for threshold in thresholds
+    }
+    up_contributions = {
+        threshold: _signal_contribution(
+            true_indices,
+            up_candidate & (p_up >= threshold),
+            prediction_index=2,
+        )
+        for threshold in thresholds
+    }
+
     aggregate_rows = []
     nonzero_rows = []
-
-    for threshold_down in threshold_grid:
-        for threshold_up in threshold_grid:
-            y_pred = threshold_predict(
-                probabilities=probabilities,
-                threshold_down=threshold_down,
-                threshold_up=threshold_up,
+    for threshold_down in thresholds:
+        for threshold_up in thresholds:
+            confusion = (
+                base_confusion
+                + down_contributions[threshold_down]
+                + up_contributions[threshold_up]
             )
-
-            row = aggregate_metric_row(
-                y_true=y_true,
-                y_pred=y_pred,
+            row = _aggregate_row_from_confusion(
+                confusion,
                 split=split,
                 horizon=horizon,
                 model_name=model_name,
             )
-
             row["threshold_down"] = threshold_down
             row["threshold_up"] = threshold_up
             aggregate_rows.append(row)
 
-            nonzero = evaluate_nonzero_subset(
-                y_true=y_true,
-                y_pred=y_pred,
+            nonzero = _nonzero_row_from_confusion(
+                confusion,
                 split=split,
                 horizon=horizon,
                 model_name=model_name,
             )
-
             nonzero["threshold_down"] = threshold_down
             nonzero["threshold_up"] = threshold_up
             nonzero_rows.append(nonzero)
 
-    return (
-        pd.DataFrame(aggregate_rows),
-        pd.concat(nonzero_rows, ignore_index=True),
+    return pd.DataFrame(aggregate_rows), pd.DataFrame(nonzero_rows)
+
+
+def _validate_threshold_grid(
+    threshold_grid: tuple[float, ...],
+) -> tuple[float, ...]:
+    if not threshold_grid:
+        raise ValueError("threshold_grid must not be empty.")
+    thresholds = tuple(float(value) for value in threshold_grid)
+    if len(set(thresholds)) != len(thresholds):
+        raise ValueError("threshold_grid values must be unique.")
+    if any(not 0.0 <= value <= 1.0 for value in thresholds):
+        raise ValueError("threshold_grid values must be between 0 and 1.")
+    return thresholds
+
+
+def _signal_contribution(
+    true_indices: np.ndarray,
+    signal_mask: np.ndarray,
+    *,
+    prediction_index: int,
+) -> np.ndarray:
+    counts = np.bincount(true_indices[signal_mask], minlength=3)
+    contribution = np.zeros((3, 3), dtype=np.int64)
+    contribution[:, 1] -= counts
+    contribution[:, prediction_index] += counts
+    return contribution
+
+
+def _aggregate_row_from_confusion(
+    confusion: np.ndarray,
+    *,
+    split: str,
+    horizon: int,
+    model_name: str,
+) -> dict:
+    n_obs = int(confusion.sum())
+    if n_obs <= 0:
+        raise ValueError("Cannot evaluate an empty confusion matrix.")
+
+    support = confusion.sum(axis=1)
+    predicted = confusion.sum(axis=0)
+    true_positive = np.diag(confusion).astype(np.float64)
+    recall = np.divide(
+        true_positive,
+        support,
+        out=np.zeros(3, dtype=np.float64),
+        where=support > 0,
     )
+    precision = np.divide(
+        true_positive,
+        predicted,
+        out=np.zeros(3, dtype=np.float64),
+        where=predicted > 0,
+    )
+    f1 = np.divide(
+        2.0 * precision * recall,
+        precision + recall,
+        out=np.zeros(3, dtype=np.float64),
+        where=(precision + recall) > 0,
+    )
+
+    return {
+        "model": model_name,
+        "split": split,
+        "horizon": horizon,
+        "n_obs": n_obs,
+        "accuracy": float(true_positive.sum() / n_obs),
+        "macro_f1": float(f1.mean()),
+        "balanced_accuracy": float(recall[support > 0].mean()),
+        "pred_down_fraction": float(predicted[0] / n_obs),
+        "pred_unchanged_fraction": float(predicted[1] / n_obs),
+        "pred_up_fraction": float(predicted[2] / n_obs),
+        "true_down_fraction": float(support[0] / n_obs),
+        "true_unchanged_fraction": float(support[1] / n_obs),
+        "true_up_fraction": float(support[2] / n_obs),
+    }
+
+
+def _nonzero_row_from_confusion(
+    confusion: np.ndarray,
+    *,
+    split: str,
+    horizon: int,
+    model_name: str,
+) -> dict:
+    nonzero_confusion = confusion.copy()
+    nonzero_confusion[1, :] = 0
+    n_nonzero = int(nonzero_confusion.sum())
+    if n_nonzero == 0:
+        return {
+            "model": model_name,
+            "split": split,
+            "horizon": horizon,
+            "n_nonzero_obs": 0,
+            "nonzero_accuracy": np.nan,
+            "nonzero_macro_f1": np.nan,
+            "nonzero_balanced_accuracy": np.nan,
+            "predicted_zero_on_nonzero_fraction": np.nan,
+        }
+
+    support = nonzero_confusion.sum(axis=1)
+    predicted = nonzero_confusion.sum(axis=0)
+    true_positive = np.diag(nonzero_confusion).astype(np.float64)
+    recall = np.divide(
+        true_positive,
+        support,
+        out=np.zeros(3, dtype=np.float64),
+        where=support > 0,
+    )
+    precision = np.divide(
+        true_positive,
+        predicted,
+        out=np.zeros(3, dtype=np.float64),
+        where=predicted > 0,
+    )
+    f1 = np.divide(
+        2.0 * precision * recall,
+        precision + recall,
+        out=np.zeros(3, dtype=np.float64),
+        where=(precision + recall) > 0,
+    )
+    directional_support = support[[0, 2]] > 0
+    directional_recall = recall[[0, 2]][directional_support]
+
+    return {
+        "model": model_name,
+        "split": split,
+        "horizon": horizon,
+        "n_nonzero_obs": n_nonzero,
+        "nonzero_accuracy": float(true_positive.sum() / n_nonzero),
+        "nonzero_macro_f1": float(f1.mean()),
+        "nonzero_balanced_accuracy": float(directional_recall.mean()),
+        "predicted_zero_on_nonzero_fraction": float(
+            nonzero_confusion[:, 1].sum() / n_nonzero
+        ),
+    }
 
 
 def best_thresholds_table(
@@ -369,13 +526,25 @@ def best_thresholds_table(
 
     for h, g in threshold_results.groupby("horizon", sort=True):
         best_macro = g.sort_values(
-            ["macro_f1", "balanced_accuracy", "accuracy"],
-            ascending=[False, False, False],
+            [
+                "macro_f1",
+                "balanced_accuracy",
+                "accuracy",
+                "threshold_down",
+                "threshold_up",
+            ],
+            ascending=[False, False, False, True, True],
         ).iloc[0]
 
         best_balanced = g.sort_values(
-            ["balanced_accuracy", "macro_f1", "accuracy"],
-            ascending=[False, False, False],
+            [
+                "balanced_accuracy",
+                "macro_f1",
+                "accuracy",
+                "threshold_down",
+                "threshold_up",
+            ],
+            ascending=[False, False, False, True, True],
         ).iloc[0]
 
         for selection_metric, row in [
@@ -401,6 +570,98 @@ def best_thresholds_table(
             )
 
     return pd.DataFrame(rows)
+
+
+def frozen_threshold_mapping(
+    table: pd.DataFrame,
+    *,
+    selection_metric: str,
+    horizons: tuple[int, ...],
+    dataset_sha256: str,
+    experiment_fingerprint: str,
+    model_created_utc: dict[int, str],
+    model_parameter_fingerprint: dict[int, str],
+) -> dict[int, tuple[float, float]]:
+    """Validate validation-selected thresholds against exact frozen models."""
+    required = {
+        "horizon",
+        "selection_metric",
+        "threshold_down",
+        "threshold_up",
+        "dataset_sha256",
+        "experiment_fingerprint",
+        "model_created_utc",
+        "model_parameter_fingerprint",
+    }
+    missing = sorted(required - set(table.columns))
+    if missing:
+        raise ValueError(f"Frozen threshold table is missing columns: {missing}")
+
+    selected = table.loc[table["selection_metric"] == selection_metric].copy()
+    if selected.empty:
+        raise ValueError(
+            f"No thresholds found for selection_metric={selection_metric!r}."
+        )
+    if selected["horizon"].duplicated().any():
+        duplicated = sorted(
+            selected.loc[selected["horizon"].duplicated(), "horizon"]
+            .astype(int)
+            .unique()
+        )
+        raise ValueError(f"Duplicate frozen thresholds for horizons: {duplicated}")
+
+    selected["horizon"] = selected["horizon"].astype(int)
+    observed_horizons = set(selected["horizon"])
+    expected_horizons = set(horizons)
+    if observed_horizons != expected_horizons:
+        raise ValueError(
+            "Frozen threshold horizons differ from the protocol: "
+            f"observed={sorted(observed_horizons)}, "
+            f"expected={sorted(expected_horizons)}"
+        )
+    if set(model_created_utc) != expected_horizons:
+        raise ValueError("Frozen model creation IDs are incomplete.")
+    if set(model_parameter_fingerprint) != expected_horizons:
+        raise ValueError("Frozen model parameter fingerprints are incomplete.")
+
+    mapping = {}
+    for _, row in selected.iterrows():
+        horizon = int(row["horizon"])
+        threshold_down = float(row["threshold_down"])
+        threshold_up = float(row["threshold_up"])
+        if (
+            not np.isfinite(threshold_down)
+            or not np.isfinite(threshold_up)
+            or not 0.0 <= threshold_down <= 1.0
+            or not 0.0 <= threshold_up <= 1.0
+        ):
+            raise ValueError(
+                f"Invalid frozen thresholds for horizon {horizon}: "
+                f"down={threshold_down}, up={threshold_up}"
+            )
+        if str(row["dataset_sha256"]) != dataset_sha256:
+            raise ValueError(
+                f"Threshold dataset hash mismatch for horizon {horizon}."
+            )
+        if str(row["experiment_fingerprint"]) != experiment_fingerprint:
+            raise ValueError(
+                f"Threshold protocol fingerprint mismatch for horizon {horizon}."
+            )
+        if str(row["model_created_utc"]) != model_created_utc[horizon]:
+            raise ValueError(
+                f"Threshold model identity mismatch for horizon {horizon}."
+            )
+        if (
+            str(row["model_parameter_fingerprint"])
+            != model_parameter_fingerprint[horizon]
+        ):
+            raise ValueError(
+                "Threshold model parameter fingerprint mismatch for "
+                f"horizon {horizon}."
+            )
+        mapping[horizon] = (threshold_down, threshold_up)
+
+    return mapping
 
 
 def best_threshold_confusion_tables(

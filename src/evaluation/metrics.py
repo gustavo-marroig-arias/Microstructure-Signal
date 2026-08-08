@@ -13,8 +13,8 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
 )
 
+from src.protocol import TERNARY_LABELS
 
-TERNARY_LABELS = [-1, 0, 1]
 TERNARY_LABEL_NAMES = {
     -1: "down",
     0: "unchanged",
@@ -27,8 +27,12 @@ def validate_labels(y_true: Iterable, y_pred: Iterable | None = None) -> None:
     Checks that labels are in {-1, 0, +1}.
     """
     y_true_arr = pd.Series(y_true)
+    if y_true_arr.empty:
+        raise ValueError("y_true must not be empty.")
+    if y_true_arr.isna().any():
+        raise ValueError("y_true contains missing values.")
 
-    observed_true = set(y_true_arr.dropna().unique())
+    observed_true = set(y_true_arr.unique())
 
     if not observed_true.issubset(set(TERNARY_LABELS)):
         raise ValueError(f"Unexpected y_true labels: {observed_true}")
@@ -38,8 +42,10 @@ def validate_labels(y_true: Iterable, y_pred: Iterable | None = None) -> None:
 
         if len(y_true_arr) != len(y_pred_arr):
             raise ValueError("y_true and y_pred must have the same length.")
+        if y_pred_arr.isna().any():
+            raise ValueError("y_pred contains missing values.")
 
-        observed_pred = set(y_pred_arr.dropna().unique())
+        observed_pred = set(y_pred_arr.unique())
 
         if not observed_pred.issubset(set(TERNARY_LABELS)):
             raise ValueError(f"Unexpected y_pred labels: {observed_pred}")
@@ -331,9 +337,14 @@ def evaluate_nonzero_subset(
     y_true_nz = y_true.loc[mask].reset_index(drop=True)
     y_pred_nz = y_pred.loc[mask].reset_index(drop=True)
 
-    recall_down = ((y_true_nz == -1) & (y_pred_nz == -1)).sum() / (y_true_nz == -1).sum()
-    recall_up = ((y_true_nz == 1) & (y_pred_nz == 1)).sum() / (y_true_nz == 1).sum()
-    nonzero_balanced_accuracy = 0.5 * (recall_down + recall_up)
+    directional_recalls = []
+    for label in (-1, 1):
+        label_mask = y_true_nz == label
+        if bool(label_mask.any()):
+            directional_recalls.append(
+                float((y_pred_nz.loc[label_mask] == label).mean())
+            )
+    nonzero_balanced_accuracy = float(np.mean(directional_recalls))
 
     return pd.DataFrame(
         [

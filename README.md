@@ -19,23 +19,50 @@ breaks.
 
 ## Current Status
 
-The current canonical experiment is the `v2_float64_features` 7-day checkpoint:
+The current canonical experiment is the `v3_fixed_window_features` 7-day checkpoint:
 
 - symbol: `BTCUSDT`
 - sample: `2024-03-01` to `2024-03-07` UTC
-- artifact tag: `v2_float64_features`
-- quote-event rows after feature/label construction: about 223 million
+- artifact tag: `v3_fixed_window_features`
+- distinct quote-state events: 223,033,235
+- feature/label rows after the 50-event terminal drop: 223,033,185
 - model-eligible final test rows: 28,715,045
 - `mid_return_5` and `realized_vol_20` are computed and stored as `float64`
-- the log-return-derived feature precision audit now passes
+- the log-return-derived feature precision audit passes
 - compact prediction/probability summary diagnostics are included under `outputs/reports`
 - plots and a current result manifest are available under `outputs/reports`
 - selected plots are discussed in `docs/current_results.md`
 - frozen final-test evaluation is complete for this checkpoint
+- pooled, regime-conditioned, and compact-prediction results reconcile exactly
+- integration verification passes with maximum metric reconstruction error of
+  `1.11e-16`
 
 The research protocol targets 30 clean calendar days, or at least 14 if 30 are not
-available. This 7-day v2 run should therefore be treated as a checkpoint, not the
+available. This 7-day run should therefore be treated as a checkpoint, not the
 final generalization claim. A longer 14-day replication remains pending.
+
+## Engineering Safeguards
+
+The pipeline now fails closed around the main numerical and leakage boundaries:
+
+- canonical horizons, features, labels, and split rules live in `src/protocol.py`
+- fitted logistic artifacts contain ordered features/classes, scaler state,
+  coefficients, intercepts, convergence metadata, and dataset/protocol hashes
+- model metadata includes a SHA-256 checksum of its array payload, so incomplete
+  or mixed artifact replacements fail closed
+- validation thresholds are bound to an exact fingerprint of the scaler,
+  coefficients, intercepts, feature order, and class order
+- serialized probabilities must match the fitted sklearn estimator, after applying
+  the stored train-only scaler, within `1e-12`
+- probability diagnostics, final test, regime analysis, and compact predictions
+  consume frozen artifacts rather than refitting or reconstructing scaler state
+- raw quality checks, event construction, feature construction, split construction,
+  target diagnostics, and high-volume audit checks use bounded-memory parquet
+  processing
+- model data is stored by chronological split, and readers request only required
+  columns and partitions
+- CI runs compilation, Ruff, the invariant test suite, and at least 75% coverage across
+  the critical optimized modules
 
 ## Research Question
 
@@ -123,12 +150,13 @@ Important controls:
 
 - no random split
 - no shuffling
-- scalers fit on train only through an sklearn pipeline
+- scaler statistics fit on train only with ordered `StandardScaler.partial_fit`
 - features use only current and past quote/trade information
 - labels use future midprices only for the target
 - the last 50 labeled observations of train and validation are marked as boundary drops
 - validation is used for threshold selection and diagnostics
-- final test is evaluated once for final reporting
+- test labels are not used for feature, model, or threshold selection; the canonical
+  v3 result is frozen after evaluation
 
 The audit checks:
 
@@ -142,16 +170,26 @@ The audit checks:
 - coefficient sign interpretation
 - confusion matrix behavior under class imbalance
 - spread-relative label magnitude
-- protocol-defined regime performance by spread, realized volatility, and trade intensity
-- For realized volatility, the train median is zero, so the high-volatility bucket should be interpreted as a nonzero-volatility / more active regime rather than a balanced half-sample split.
+- protocol-defined regime cutoffs for spread, realized volatility, and trade intensity
+
+Regime analysis uses medians estimated on the training split and applies those
+cutoffs unchanged to validation and test. Predictions come from the same complete
+frozen scaler/model artifacts used by the pooled evaluation. The integration
+verifier independently reconstructs pooled metrics, recombines regime slices, and
+checks compact-prediction confusion counts.
+
 Audit summary:
 
 ```text
 critical_audit_passed: true
 leakage_evidence: no_evidence_found
-main_caveat: pass
+main_result_status: frozen_test_result_supported_by_audit
 log_feature_precision_status: pass
 ```
+
+The audit combines deterministic full-table checks with sampled manual
+recomputations. Passing it supports the result within that scope; it is not a
+proof that every possible implementation error has been excluded.
 
 ## Models
 
@@ -163,11 +201,14 @@ The main comparison uses:
 - `full_logistic_thresholded`: secondary validation-selected probability threshold rule
 
 The primary model is `full_logistic`. The thresholded model is a secondary operating
-point selected on validation macro F1 before final test evaluation.
+point selected on validation macro F1 before final test evaluation. Its down/up
+thresholds are chosen from a fixed 15-by-15 grid on one validation segment, so the
+larger thresholded gains carry more model-selection uncertainty than the primary
+argmax result and require fresh-sample replication.
 
 ## Frozen Final Test Results
 
-Final test metrics for the current 7-day v2 frozen experiment:
+Final test metrics for the current 7-day v3 frozen experiment:
 
 | Horizon | Model | Accuracy | Macro F1 | Balanced Accuracy |
 | ---: | --- | ---: | ---: | ---: |
@@ -177,8 +218,8 @@ Final test metrics for the current 7-day v2 frozen experiment:
 | 10 | full logistic, thresholded | 0.770 | 0.584 | 0.600 |
 | 20 | majority baseline | 0.686 | 0.271 | 0.333 |
 | 20 | queue-imbalance logistic | 0.686 | 0.271 | 0.333 |
-| 20 | full logistic | 0.724 | 0.435 | 0.423 |
-| 20 | full logistic, thresholded | 0.705 | 0.628 | 0.647 |
+| 20 | full logistic | 0.724 | 0.434 | 0.423 |
+| 20 | full logistic, thresholded | 0.705 | 0.628 | 0.648 |
 | 50 | majority baseline | 0.468 | 0.213 | 0.333 |
 | 50 | queue-imbalance logistic | 0.468 | 0.213 | 0.333 |
 | 50 | full logistic | 0.556 | 0.443 | 0.456 |
@@ -195,8 +236,21 @@ Non-zero subset performance for the thresholded model:
 | Horizon | Non-zero Accuracy | Non-zero Macro F1 | Non-zero Balanced Accuracy |
 | ---: | ---: | ---: | ---: |
 | 10 | 0.476 | 0.418 | 0.477 |
-| 20 | 0.591 | 0.485 | 0.591 |
+| 20 | 0.592 | 0.486 | 0.593 |
 | 50 | 0.681 | 0.530 | 0.681 |
+
+Regime-conditioned balanced accuracy for the thresholded 50-event model:
+
+| Regime variable | Lower regime | Balanced Accuracy | Upper regime | Balanced Accuracy |
+| --- | --- | ---: | --- | ---: |
+| Relative spread | tight | 0.651 | wide | 0.568 |
+| Realized volatility | zero | 0.597 | positive | 0.664 |
+| Trade intensity | low | 0.641 | high | 0.663 |
+
+The realized-volatility training median is exactly zero, so that diagnostic is a
+zero-versus-positive split rather than two similarly sized volatility buckets.
+Regime results are descriptive diagnostics from the same final test, not separate
+confirmatory tests.
 
 ## Interpretation
 
@@ -224,7 +278,7 @@ longer sample.
 
 ## Limitations
 
-1. The current frozen experiment is a 7-day v2 checkpoint. The final protocol target
+1. The current frozen experiment is a 7-day checkpoint. The final protocol target
    is 14 or 30 clean days, so the result should not be read as a full-sample
    generalization claim.
 2. The study covers one instrument and one venue: Binance USDT-M `BTCUSDT`.
@@ -232,8 +286,16 @@ longer sample.
    interpretation, but it does not test more flexible nonlinear learners.
 4. Validation and test contain materially more directional labels than train. The
    target drift is reported explicitly and motivates replication on a longer sample.
-5. Regime-performance tables are included, but the current regime conclusions are
-   still based on the 7-day checkpoint sample.
+5. The final test covers about 33.6 hours over two UTC dates. Regime slices are
+   therefore useful for diagnosis but too temporally narrow for broad stability claims.
+6. The realized-volatility median is zero, making its low/high regime split
+   structurally imbalanced and best interpreted as zero versus positive volatility.
+7. Adjacent event-time labels overlap and observations are serially dependent. The
+   row count is therefore not an independent sample size; this checkpoint reports
+   predictive metrics, not iid standard errors, p-values, or confidence intervals.
+8. The thresholded operating point was selected on a single validation segment.
+   Its test performance is secondary evidence and may include validation-selection
+   optimism even though the test labels were not used to choose the thresholds.
 
 ## Repository Structure
 
@@ -243,11 +305,16 @@ src/
   data_loader.py                 # Binance download/load/parsing helpers
   quality_checks.py              # raw quote/trade quality checks
   event_builder_opt.py           # memory-lean distinct quote-event construction
-  feature_builder_opt_float_64.py # v2 float64 log-return-derived feature builder
+  feature_builder_opt_float_64.py # float64 log-return-derived feature builder
+  streaming_features.py          # bounded-memory exact feature construction
+  partitioned_splits.py          # two-pass split-specific parquet writer
+  model_dataset_io.py            # split/column-pruned model-data reads
+  protocol.py                    # canonical experiment definition and fingerprint
   split_config.py                # chronological split and boundary drops
   modeling/
     majority_baseline.py
     logistic_models.py
+    model_artifacts.py
   evaluation/
     metrics.py
     model_comparison.py
@@ -257,7 +324,6 @@ src/
 scripts/
   load_data.py
   quality_report.py
-  build_events.py
   build_features_labels_opt.py
   build_splits.py
   run_majority_baseline.py
@@ -275,11 +341,16 @@ scripts/
 docs/
   microstructure_signal_memo.md
   current_results.md
+  engineering_design.md
 
 outputs/
   reports/
   results/
   logs/
+
+tests/                         # numerical, leakage, and boundary invariants
+benchmarks/                    # reproducible Pandas/Polars benchmark
+.github/workflows/ci.yml       # compile, lint, test, and coverage checks
 ```
 
 ## Setup
@@ -312,6 +383,14 @@ Run the lightweight metric smoke test:
 python scripts/smoke_test_metrics.py
 ```
 
+Install development checks and run the full local quality gate:
+
+```bash
+python -m pip install -r requirements-dev.txt
+ruff check src scripts tests benchmarks
+python -m pytest
+```
+
 ### 1-Day Pipeline Smoke Run
 
 This run exercises the full pipeline shape on a smaller date range. It is for
@@ -323,7 +402,7 @@ If raw zip files are already present locally, omit `--download`.
 ```bash
 START=2024-03-01
 END=2024-03-01
-TAG=v2_float64_features
+TAG=v3_fixed_window_features
 
 python scripts/load_data.py --start "$START" --end "$END" --symbol BTCUSDT --download
 python scripts/quality_report.py --start "$START" --end "$END" --symbol BTCUSDT
@@ -332,28 +411,43 @@ python scripts/build_features_labels_opt.py --start "$START" --end "$END" --symb
 python scripts/build_splits.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG"
 python scripts/target_diagnostics.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG"
 python scripts/run_majority_baseline.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG"
-python scripts/run_queue_imbalance_logistic.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --max-iter 50
-python scripts/run_full_logistic.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --solver saga --max-iter 50 --n-jobs -1
-python scripts/run_probability_diagnostics.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --solver saga --max-iter 50 --n-jobs -1
-python scripts/run_final_test_evaluation.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --solver saga --max-iter 50 --n-jobs -1
-python scripts/run_regime_analysis.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --splits test
+python scripts/run_queue_imbalance_logistic.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG"
+python scripts/run_full_logistic.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG"
+python scripts/compare_validation_results.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG"
+python scripts/run_probability_diagnostics.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG"
+python scripts/run_final_test_evaluation.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --threshold-selection-metric macro_f1
+python scripts/run_regime_analysis.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --threshold-selection-metric macro_f1 --splits validation,test
+python scripts/save_compact_test_predictions.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --threshold-selection-metric macro_f1
+python scripts/run_research_audit.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --experiment-tag "$TAG"
+python scripts/verify_integration_run.py --start "$START" --end "$END" --symbol BTCUSDT --artifact-tag "$TAG" --threshold-selection-metric macro_f1
 ```
 
-## Reproducing the Current Pipeline
+Model fitting and probability diagnostics commit a small checkpoint after each
+completed horizon. If a run is interrupted, repeat the same command with
+`--resume`. Resume fails closed if the dataset, protocol, features, optimizer
+configuration, source-tree fingerprint, or frozen model parameters differ.
 
-The current frozen run uses:
+## Running the Canonical 7-Day Pipeline
+
+The canonical regeneration uses:
 
 ```text
 START=2024-03-01
 END=2024-03-07
 SYMBOL=BTCUSDT
-TAG=v2_float64_features
+TAG=v3_fixed_window_features
 ```
 
 The full 7-day run is compute-heavy. It processes hundreds of millions of
 quote-event rows and can produce tens of GB of local data/output artifacts. Before
 running the full pipeline, use the 1-day smoke run above to check that the local
 environment, data paths, and scripts work.
+
+Create a reviewed local commit before this run. Canonical high-volume commands
+below use `--require-clean-git`; development smoke runs may omit it. Each stage
+writes JSON metadata under `outputs/reports/run_metadata/`, including the Git
+commit, dirty/clean status, source-tree SHA-256, command arguments, elapsed time,
+peak resident memory, and available dataset/protocol fingerprints.
 
 Download and parse local Binance files:
 
@@ -376,19 +470,19 @@ python scripts/quality_report.py --start "$START" --end "$END" --symbol "$SYMBOL
 Build distinct quote events:
 
 ```bash
-python scripts/build_events.py --start "$START" --end "$END" --symbol "$SYMBOL"
+python scripts/build_events.py --start "$START" --end "$END" --symbol "$SYMBOL" --require-clean-git
 ```
 
 Build labels and `float64` log-return-derived features:
 
 ```bash
-python scripts/build_features_labels_opt.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG"
+python scripts/build_features_labels_opt.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --require-clean-git
 ```
 
 Build chronological train / validation / test splits:
 
 ```bash
-python scripts/build_splits.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG"
+python scripts/build_splits.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --require-clean-git
 ```
 
 Freeze dataset metadata and target diagnostics:
@@ -400,23 +494,26 @@ python scripts/target_diagnostics.py --start "$START" --end "$END" --symbol "$SY
 Run validation models and diagnostics:
 
 ```bash
-python scripts/run_majority_baseline.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG"
-python scripts/run_queue_imbalance_logistic.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --max-iter 300
-python scripts/run_full_logistic.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --solver saga --max-iter 300 --n-jobs -1
+python scripts/run_majority_baseline.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --require-clean-git
+python scripts/run_queue_imbalance_logistic.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --require-clean-git
+python scripts/run_full_logistic.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --require-clean-git
 python scripts/compare_validation_results.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG"
-python scripts/run_probability_diagnostics.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --solver saga --max-iter 300 --n-jobs -1
+python scripts/run_probability_diagnostics.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --require-clean-git
 ```
+
+After an interruption, repeat only the affected checkpointed command with
+`--resume --require-clean-git`. Do not combine `--resume` and `--overwrite`.
 
 Run final test evaluation only after validation diagnostics are frozen:
 
 ```bash
-python scripts/run_final_test_evaluation.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --solver saga --max-iter 300 --n-jobs -1
+python scripts/run_final_test_evaluation.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --threshold-selection-metric macro_f1 --require-clean-git
 ```
 
 Run protocol regime analysis using train-median cutoffs applied unchanged to validation/test:
 
 ```bash
-python scripts/run_regime_analysis.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG"
+python scripts/run_regime_analysis.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --threshold-selection-metric macro_f1 --splits validation,test --require-clean-git
 ```
 
 Run the research audit:
@@ -428,14 +525,21 @@ python scripts/run_research_audit.py --start "$START" --end "$END" --symbol "$SY
 Save compact test-only prediction/probability diagnostics:
 
 ```bash
-python scripts/save_compact_test_predictions.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG"
+python scripts/save_compact_test_predictions.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --threshold-selection-metric macro_f1 --require-clean-git
+```
+
+Verify row counts, dataset identity, metric reconstruction, regime recombination,
+compact-prediction parity, and audit status:
+
+```bash
+python scripts/verify_integration_run.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --threshold-selection-metric macro_f1
 ```
 
 Create compact plots and the current result manifest:
 
 ```bash
-python scripts/make_result_plots.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG"
-python scripts/write_current_result_manifest.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG"
+python scripts/make_result_plots.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --include-regime-plot
+python scripts/write_current_result_manifest.py --start "$START" --end "$END" --symbol "$SYMBOL" --artifact-tag "$TAG" --include-regime-artifacts
 ```
 
 Important: after `run_final_test_evaluation.py`, do not change features, thresholds,
@@ -447,33 +551,32 @@ new experiment on a fresh validation/test protocol.
 Current frozen result files:
 
 ```text
-data/processed/feature_table_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.parquet
-data/processed/model_dataset_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.parquet
-outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_aggregate.csv
-outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_nonzero_subset.csv
-outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_daily_blocks.csv
-outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_aggregate.csv
-outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_nonzero_subset.csv
-outputs/results/compact_test_predictions_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.parquet
-outputs/reports/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_full_vs_baselines_deltas.csv
-outputs/reports/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_frozen_thresholds.csv
-outputs/reports/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_thresholds.csv
-outputs/reports/compact_test_predictions_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_summary.csv
+data/processed/feature_table_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07.parquet
+data/processed/model_dataset_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07/
+outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_aggregate.csv
+outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_nonzero_subset.csv
+outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_aggregate.csv
+outputs/results/compact_test_predictions_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07.parquet
+outputs/reports/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_frozen_thresholds.csv
+outputs/reports/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_thresholds.csv
+outputs/reports/compact_test_predictions_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_summary.csv
 outputs/reports/current_result_manifest.md
-outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_target_drift.png
-outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_horizon_performance.png
-outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_thresholded_vs_argmax_recall.png
-outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_performance.png
-outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_nonzero_performance.png
-outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v2_float64_features/audit_summary.json
-outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v2_float64_features/final_audit_conclusion.csv
+outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_horizon_performance.png
+outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_performance.png
+outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_target_drift.png
+outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_thresholded_vs_argmax_recall.png
+outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v3_fixed_window_features/audit_summary.json
+outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v3_fixed_window_features/final_audit_conclusion.csv
 ```
 
 ## Future Work
 
 Planned extensions:
 
-1. Add prediction-conditioned diagnostics using the compact probability summaries.
-2. Add an incremental-learning model as a secondary extension using the same features, labels, splits, and validation-only model selection discipline.
-3. Run a fresh 14-day clean-sample replication after the static and incremental pipelines are fixed.
-4. Update the README, memo, and result review after the replication run.
+1. Add a delayed-feedback incremental-learning extension using the same
+   features, labels, splits, and validation-only model selection discipline.
+2. Add calibration, abstention, and transaction-cost sensitivity diagnostics
+   without presenting them as an executable PnL backtest.
+3. Freeze the extension protocol before running a fresh 14-day comparison of
+   static, rolling-refit, and online models.
+4. Test cross-period and, where data permits, cross-instrument stability.

@@ -16,10 +16,15 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.data_loader import parse_date  # noqa: E402
 from src.artifact_naming import tagged_artifact_stem  # noqa: E402
+from src.model_dataset_io import resolve_model_dataset  # noqa: E402
+from src.protocol import (  # noqa: E402
+    DEFAULT_HORIZONS,
+    TERNARY_LABELS,
+    validate_protocol_symbol,
+)
 
 
-DEFAULT_HORIZONS = (10, 20, 50)
-CLASS_LABELS = (-1, 0, 1)
+CLASS_LABELS = TERNARY_LABELS
 CLASS_NAMES = ("down", "unchanged", "up")
 
 
@@ -41,6 +46,14 @@ def parse_horizons(raw: str) -> tuple[int, ...]:
 
 def label_columns(horizons: tuple[int, ...]) -> list[str]:
     return [f"y_{h}" for h in horizons]
+
+
+def json_safe_scalar(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
 
 
 def make_experiment_id(
@@ -77,7 +90,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional filename tag inserted after the artifact kind, e.g. "
-            "'v2_float64_features'."
+            "'v3_fixed_window_features'."
         ),
     )
     parser.add_argument(
@@ -101,7 +114,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional suffix for the output folder, e.g. 'full_resolution_v1', "
-            "'v2_float64_features', or '14day_replication'."
+            "'v3_fixed_window_features', or '14day_replication'."
         ),
     )
     parser.add_argument(
@@ -169,8 +182,55 @@ def ensure_exists(path: Path) -> None:
         raise FileNotFoundError(f"Missing required file: {path}")
 
 
+def parquet_file_paths(path: Path) -> tuple[Path, ...]:
+    """Return deterministic Parquet inputs without admitting sidecar files."""
+    path = Path(path)
+    if path.is_file():
+        if path.suffix != ".parquet":
+            raise ValueError(f"Expected a Parquet file, got: {path}")
+        return (path,)
+    if not path.is_dir():
+        raise FileNotFoundError(f"Missing Parquet dataset: {path}")
+
+    paths = tuple(sorted(path.glob("*.parquet")))
+    if not paths:
+        raise FileNotFoundError(
+            f"No top-level Parquet files found in dataset directory: {path}"
+        )
+    return paths
+
+
+def parquet_dataset(path: Path) -> ds.Dataset:
+    return ds.dataset(
+        [str(file_path) for file_path in parquet_file_paths(path)],
+        format="parquet",
+    )
+
+
 def parquet_columns(path: Path) -> set[str]:
-    return set(pq.ParquetFile(path).schema.names)
+    return set(parquet_dataset(path).schema.names)
+
+
+def parquet_num_rows(path: Path) -> int:
+    return sum(
+        int(pq.ParquetFile(file_path).metadata.num_rows)
+        for file_path in parquet_file_paths(path)
+    )
+
+
+def iter_parquet_batches(
+    path: Path,
+    columns: list[str],
+    *,
+    batch_size: int,
+):
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive.")
+    return parquet_dataset(path).scanner(
+        columns=columns,
+        batch_size=batch_size,
+        use_threads=False,
+    ).to_batches()
 
 
 def ensure_columns(path: Path, required_columns: list[str], context: str) -> None:
@@ -192,6 +252,15 @@ def choose_event_id_sample(
     max_future_horizon: int = 0,
     lookback: int = 0,
 ) -> np.ndarray:
+    if num_rows <= 0:
+        raise ValueError("num_rows must be positive.")
+    if sample_size <= 0:
+        raise ValueError("sample_size must be positive.")
+    if min_event_id < 0 or max_future_horizon < 0 or lookback < 0:
+        raise ValueError(
+            "min_event_id, max_future_horizon, and lookback must be non-negative."
+        )
+
     lower = max(min_event_id, lookback)
     upper_exclusive = num_rows - max_future_horizon
 
@@ -201,10 +270,13 @@ def choose_event_id_sample(
             f"num_rows={num_rows}, lower={lower}, upper_exclusive={upper_exclusive}"
         )
 
-    population = np.arange(lower, upper_exclusive, dtype=np.int64)
-    size = min(sample_size, len(population))
-
-    return rng.choice(population, size=size, replace=False)
+    population_size = upper_exclusive - lower
+    size = min(sample_size, population_size)
+    return (
+        rng.choice(population_size, size=size, replace=False)
+        .astype(np.int64, copy=False)
+        + lower
+    )
 
 
 def read_parquet_by_event_ids(
@@ -214,7 +286,7 @@ def read_parquet_by_event_ids(
 ) -> pd.DataFrame:
     event_ids = sorted(set(int(x) for x in event_ids))
 
-    dataset = ds.dataset(path, format="parquet")
+    dataset = parquet_dataset(path)
     table = dataset.to_table(
         columns=columns,
         filter=ds.field("event_id").isin(event_ids),
@@ -275,7 +347,7 @@ def audit_label_alignment(
         "quote events for label alignment audit",
     )
 
-    num_rows = pq.ParquetFile(model_path).metadata.num_rows
+    num_rows = parquet_num_rows(model_path)
 
     sample_event_ids = choose_event_id_sample(
         num_rows=num_rows,
@@ -377,61 +449,125 @@ def audit_split_boundaries(
 
     ensure_columns(model_path, cols, "model dataset for split-boundary audit")
 
-    split_meta = pd.read_parquet(model_path, columns=cols)
+    summary_state = {
+        split: {
+            "rows_total": 0,
+            "feature_complete_rows": 0,
+            "boundary_drop_rows": 0,
+            "model_eligible_rows": 0,
+            "timestamp_start": None,
+            "timestamp_end": None,
+        }
+        for split in ("train", "validation", "test")
+    }
+    boundary_frames = []
+    no_eligible_boundary = True
+    eligible_features_complete = True
 
-    split_summary = (
-        split_meta
-        .groupby("split")
-        .agg(
-            rows_total=("event_id", "size"),
-            feature_complete_rows=("feature_complete", "sum"),
-            boundary_drop_rows=("is_boundary_drop", "sum"),
-            model_eligible_rows=("model_eligible", "sum"),
-            timestamp_start=("timestamp", "min"),
-            timestamp_end=("timestamp", "max"),
+    for batch in iter_parquet_batches(
+        model_path,
+        cols,
+        batch_size=1_000_000,
+    ):
+        frame = batch.to_pandas()
+        unexpected = sorted(
+            set(frame["split"].dropna().unique()) - set(summary_state)
         )
-        .reset_index()
+        if unexpected:
+            raise ValueError(f"Unexpected split values: {unexpected}")
+
+        boundary_mask = frame["is_boundary_drop"].astype(bool)
+        eligible_mask = frame["model_eligible"].astype(bool)
+        no_eligible_boundary &= not bool(
+            (boundary_mask & eligible_mask).any()
+        )
+        eligible_features_complete &= bool(
+            frame.loc[eligible_mask, "feature_complete"].all()
+        )
+        if bool(boundary_mask.any()):
+            boundary_frames.append(
+                frame.loc[
+                    boundary_mask,
+                    [
+                        "event_id",
+                        "timestamp",
+                        "split",
+                        "is_boundary_drop",
+                        "model_eligible",
+                        *y_cols,
+                    ],
+                ].copy()
+            )
+
+        for split, state in summary_state.items():
+            part = frame.loc[frame["split"] == split]
+            if part.empty:
+                continue
+            state["rows_total"] += len(part)
+            state["feature_complete_rows"] += int(
+                part["feature_complete"].sum()
+            )
+            state["boundary_drop_rows"] += int(
+                part["is_boundary_drop"].sum()
+            )
+            state["model_eligible_rows"] += int(
+                part["model_eligible"].sum()
+            )
+            part_start = part["timestamp"].min()
+            part_end = part["timestamp"].max()
+            if state["timestamp_start"] is None:
+                state["timestamp_start"] = part_start
+            state["timestamp_end"] = part_end
+
+    split_summary = pd.DataFrame(
+        [
+            {"split": split, **state}
+            for split, state in summary_state.items()
+            if state["rows_total"] > 0
+        ]
     )
 
     split_summary.to_csv(output_dir / "split_boundary_summary.csv", index=False)
 
-    boundary_rows = split_meta.loc[
-        split_meta["is_boundary_drop"],
-        [
-            "event_id",
-            "timestamp",
-            "split",
-            "is_boundary_drop",
-            "model_eligible",
-            *y_cols,
-        ],
-    ].copy()
+    boundary_rows = (
+        pd.concat(boundary_frames, ignore_index=True)
+        if boundary_frames
+        else pd.DataFrame(
+            columns=[
+                "event_id",
+                "timestamp",
+                "split",
+                "is_boundary_drop",
+                "model_eligible",
+                *y_cols,
+            ]
+        )
+    )
 
     boundary_rows.to_csv(output_dir / "split_boundary_rows.csv", index=False)
 
-    split_names = set(split_meta["split"].dropna().unique())
+    split_names = set(split_summary["split"])
+    by_split = split_summary.set_index("split")
 
     checks = {
         "train_split_present": "train" in split_names,
         "validation_split_present": "validation" in split_names,
         "test_split_present": "test" in split_names,
         "train_boundary_drop_expected": (
-            int(split_meta.loc[split_meta["split"] == "train", "is_boundary_drop"].sum())
+            int(by_split.loc["train", "boundary_drop_rows"])
             == expected_boundary_drop
-        ),
+        ) if "train" in by_split.index else False,
         "validation_boundary_drop_expected": (
-            int(split_meta.loc[split_meta["split"] == "validation", "is_boundary_drop"].sum())
+            int(by_split.loc["validation", "boundary_drop_rows"])
             == expected_boundary_drop
-        ),
+        ) if "validation" in by_split.index else False,
         "test_boundary_drop_0": (
-            int(split_meta.loc[split_meta["split"] == "test", "is_boundary_drop"].sum())
+            int(by_split.loc["test", "boundary_drop_rows"])
             == 0
-        ),
-        "no_boundary_rows_are_model_eligible": not (
-            split_meta["is_boundary_drop"] & split_meta["model_eligible"]
-        ).any(),
-        "all_model_eligible_rows_are_feature_complete": bool(
-            split_meta.loc[split_meta["model_eligible"], "feature_complete"].all()
+        ) if "test" in by_split.index else False,
+        "no_boundary_rows_are_model_eligible": no_eligible_boundary,
+        "all_model_eligible_rows_are_feature_complete": (
+            eligible_features_complete
         ),
     }
 
@@ -475,7 +611,7 @@ def audit_feature_time(
         "quote events for feature-time audit",
     )
 
-    num_rows = pq.ParquetFile(model_path).metadata.num_rows
+    num_rows = parquet_num_rows(model_path)
 
     feature_audit_ids = choose_event_id_sample(
         num_rows=num_rows,
@@ -837,7 +973,7 @@ def audit_trade_flow_timing(
         "raw trades for trade-flow timing audit",
     )
 
-    num_rows = pq.ParquetFile(model_path).metadata.num_rows
+    num_rows = parquet_num_rows(model_path)
 
     trade_audit_ids = choose_event_id_sample(
         num_rows=num_rows,
@@ -1259,7 +1395,7 @@ def build_spread_relative_summary(
         "quote events for spread-relative summary",
     )
 
-    model_ds = ds.dataset(model_path, format="parquet")
+    model_ds = parquet_dataset(model_path)
 
     test_meta_table = model_ds.to_table(
         columns=[
@@ -1269,7 +1405,7 @@ def build_spread_relative_summary(
         ],
         filter=(
             (ds.field("split") == "test")
-            & (ds.field("model_eligible") == True)
+            & ds.field("model_eligible")
         ),
     )
 
@@ -1616,6 +1752,9 @@ def write_feature_precision_finding(
     output_dir: Path,
     precision_status: dict,
 ) -> dict:
+    precision_issue_found = precision_status[
+        "log_feature_precision_issue_found"
+    ]
     feature_precision_finding = {
         "finding": (
             "log-return-derived features were checked against manual recomputation. "
@@ -1629,14 +1768,19 @@ def write_feature_precision_finding(
         "max_mid_return_5_abs_error": precision_status["max_mid_return_5_abs_error"],
         "max_realized_vol_20_abs_error": precision_status["max_realized_vol_20_abs_error"],
         "likely_cause": (
-            "numerical precision, storage dtype, or implementation-window differences "
-            "in log-return-derived features"
+            "numerical precision, storage dtype, or implementation-window "
+            "differences in log-return-derived features"
+            if precision_issue_found
+            else "not_applicable_no_precision_issue_detected"
         ),
         "impact_on_current_experiment": precision_status["precision_issue_interpretation"],
         "action_for_next_experiment": (
-            "If this warning persists or becomes critical, standardize log-return-derived "
-            "feature computation using explicit float64 arithmetic and rerun the audit "
-            "before any new test evaluation."
+            "Standardize log-return-derived feature computation using explicit "
+            "float64 arithmetic and rerun the audit before any new test "
+            "evaluation."
+            if precision_issue_found
+            else "Retain explicit float64 arithmetic and the strict manual "
+            "recomputation audit in future experiments."
         ),
     }
 
@@ -1671,8 +1815,8 @@ def write_final_conclusion(
             "subject to the documented audit scope and limitations"
         )
         next_step = (
-            "proceed to either replication, v2 pipeline improvements, or broader-sample "
-            "scaling; do not retune on the already-evaluated test set"
+            "freeze the protocol and replicate on a longer untouched sample; "
+            "do not retune on the already-evaluated test set"
         )
 
     else:
@@ -1685,6 +1829,14 @@ def write_final_conclusion(
             "inspect failed critical checks, fix the pipeline if needed, and rerun the audit"
         )
 
+    if precision_status["log_feature_precision_issue_found"]:
+        main_caveat = precision_status["precision_issue_interpretation"]
+    else:
+        main_caveat = (
+            "no critical issue found within the sampled audit scope; this does "
+            "not establish tradability or exclude every possible implementation error"
+        )
+
     conclusion = {
         "experiment_id": experiment_id,
         "audit_status": "complete",
@@ -1692,7 +1844,7 @@ def write_final_conclusion(
         "critical_audit_passed": critical_audit_passed,
         "failed_critical_checks": "|".join(failed_critical_checks),
         "leakage_evidence": leakage_evidence,
-        "main_caveat": precision_status["log_feature_precision_status"],
+        "main_caveat": main_caveat,
         "precision_issue_interpretation": precision_status["precision_issue_interpretation"],
         "spread_relative_finding": build_spread_finding_text(spread_info, horizons),
         "claim_allowed": claim_allowed,
@@ -1714,6 +1866,7 @@ def write_final_conclusion(
 def main() -> None:
     args = parse_args()
 
+    validate_protocol_symbol(args.symbol)
     symbol = args.symbol
     start = parse_date(args.start).strftime("%Y-%m-%d")
     end = parse_date(args.end).strftime("%Y-%m-%d")
@@ -1742,7 +1895,7 @@ def main() -> None:
         end,
         args.artifact_tag,
     )
-    model_path = processed_dir / f"{model_stem}.parquet"
+    model_path = resolve_model_dataset(processed_dir, model_stem).path
 
     target_diag_stem = tagged_artifact_stem(
         "target_diagnostics",
@@ -1947,8 +2100,12 @@ def main() -> None:
         index=False,
     )
 
+    json_summary = {
+        key: json_safe_scalar(value)
+        for key, value in audit_summary.items()
+    }
     with open(output_dir / "audit_summary.json", "w") as f:
-        json.dump(audit_summary, f, indent=2, default=str)
+        json.dump(json_summary, f, indent=2, allow_nan=False)
 
     print()
     print("Audit summary:")

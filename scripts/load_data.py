@@ -15,6 +15,7 @@ from src.data_loader import (  # noqa: E402
     load_raw_bookticker,
     save_interim_raw_tables,
 )
+from src.protocol import validate_protocol_symbol  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,8 +67,7 @@ def main() -> None:
     print(f"End:    {args.end}")
     print()
 
-    if config.symbol != "BTCUSDT":
-        raise ValueError("Protocol violation: symbol must remain BTCUSDT.")
+    validate_protocol_symbol(config.symbol)
 
     if args.download:
         print("Downloading bookTicker files...")

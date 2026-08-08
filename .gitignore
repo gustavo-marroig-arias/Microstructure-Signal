@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.coverage
+htmlcov/
 .mypy_cache/
 .ruff_cache/
 
@@ -20,9 +22,10 @@ env/
 .env
 .env.*
 
-# Untracked research notes and exploratory notebooks
+# Untracked research notes, reference documents, and exploratory notebooks
 local_notes/
 notebooks/
+/*_cropped.pdf
 
 # Non-canonical pipeline drafts
 scripts/build_features_labels.py
@@ -43,34 +46,56 @@ logs/
 outputs/logs/
 outputs/handoff/
 outputs/tables/
+outputs/checkpoints/
+outputs/tmp/
 outputs/.matplotlib/
+outputs/models/
 outputs/results/*_predictions.parquet
 outputs/results/compact_test_predictions_*.parquet
 *.log
 
 # Generated outputs are ignored by default. Re-include only the curated
-# small v2 checkpoint artifacts selected for tracking.
+# small v3 checkpoint artifacts selected for tracking.
 outputs/reports/*
 outputs/results/*
 !outputs/reports/current_result_manifest.md
 !outputs/reports/current_result_manifest.csv
-!outputs/reports/compact_test_predictions_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_summary.csv
-!outputs/reports/feature_summary_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.csv
-!outputs/reports/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_*.csv
-!outputs/reports/label_distribution_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.csv
-!outputs/reports/split_summary_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.csv
-!outputs/reports/target_diagnostics_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07.csv
+!outputs/reports/compact_test_predictions_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_summary.csv
+!outputs/reports/feature_summary_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07.csv
+!outputs/reports/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_frozen_thresholds.csv
+!outputs/reports/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_full_vs_baselines_deltas.csv
+!outputs/reports/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_ranking.csv
+!outputs/reports/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_thresholds.csv
+!outputs/reports/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_signal_decay.csv
+!outputs/reports/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_thresholded_deltas.csv
+!outputs/reports/label_distribution_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07.csv
+!outputs/reports/split_summary_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07.csv
+!outputs/reports/target_diagnostics_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07.csv
 !outputs/reports/plots/
 outputs/reports/plots/*
-!outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_*.png
-!outputs/reports/plots/plot_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_manifest.csv
+!outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_target_drift.png
+!outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_horizon_performance.png
+!outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_thresholded_vs_argmax_recall.png
+!outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_nonzero_performance.png
+!outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_performance.png
+!outputs/reports/plots/plot_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_manifest.csv
 !outputs/reports/research_audit/
 outputs/reports/research_audit/*
-!outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v2_float64_features/
-outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v2_float64_features/*
-!outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v2_float64_features/audit_summary.json
-!outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v2_float64_features/final_audit_conclusion.csv
-!outputs/results/final_test_v2_float64_features_BTCUSDT_2024-03-01_to_2024-03-07_*.csv
+!outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v3_fixed_window_features/
+outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v3_fixed_window_features/*
+!outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v3_fixed_window_features/audit_summary.json
+!outputs/reports/research_audit/BTCUSDT_2024-03-01_to_2024-03-07_v3_fixed_window_features/final_audit_conclusion.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_aggregate.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_class_proportions.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_confusion_counts.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_confusion_true_normalized.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_daily_blocks.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_logistic_coefficients.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_majority_fit_summary.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_nonzero_subset.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_per_class.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_aggregate.csv
+!outputs/results/final_test_v3_fixed_window_features_BTCUSDT_2024-03-01_to_2024-03-07_regime_nonzero_subset.csv
 
 # Temporary or notebook-generated files
 .ipynb_checkpoints/

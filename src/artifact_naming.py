@@ -31,3 +31,24 @@ def tagged_artifact_stem(
     artifact_tag: str | None = None,
 ) -> str:
     return f"{base}{artifact_suffix(artifact_tag)}_{symbol}_{start}_to_{end}"
+
+
+def frozen_model_artifact_stem(
+    model_name: str,
+    symbol: str,
+    start: str,
+    end: str,
+    horizon: int,
+    artifact_tag: str | None = None,
+) -> str:
+    if horizon <= 0:
+        raise ValueError("horizon must be positive.")
+
+    base = tagged_artifact_stem(
+        model_name,
+        symbol,
+        start,
+        end,
+        artifact_tag,
+    )
+    return f"{base}_h{horizon}"

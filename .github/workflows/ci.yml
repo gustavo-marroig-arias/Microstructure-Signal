@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.12"
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - name: Compile
+        run: python -m compileall -q src scripts tests
+      - name: Lint
+        run: ruff check src scripts tests benchmarks
+      - name: Test
+        run: >-
+          pytest
+          --cov=src.modeling.model_artifacts
+          --cov=src.modeling.offline_experiment
+          --cov=src.modeling.disk_training
+          --cov=src.evaluation.streaming_metrics
+          --cov=src.horizon_checkpoints
+          --cov=src.run_provenance
+          --cov=src.partitioned_splits
+          --cov=src.streaming_features
+          --cov=src.event_builder_opt
+          --cov=src.quality_checks
+          --cov=src.evaluation.probability_diagnostics
+          --cov-report=term-missing
+          --cov-fail-under=75

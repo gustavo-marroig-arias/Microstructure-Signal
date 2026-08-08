@@ -4,20 +4,23 @@ import argparse
 from pathlib import Path
 import sys
 
-import pandas as pd
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.evaluation.target_diagnostics import (  # noqa: E402
-    build_dataset_manifest,
+    build_streaming_dataset_manifest,
     save_dataset_manifest,
     save_target_diagnostics,
-    target_diagnostics_by_split,
+    streaming_target_diagnostics,
 )
 
-from src.data_loader import parse_date # noqa: E402
+from src.data_loader import parse_date  # noqa: E402
 from src.artifact_naming import tagged_artifact_stem  # noqa: E402
+from src.model_dataset_io import (  # noqa: E402
+    model_dataset_sha256,
+    resolve_model_dataset,
+)
+from src.protocol import validate_protocol_symbol  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +50,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional filename tag inserted after the artifact kind, e.g. "
-            "'v2_float64_features'."
+            "'v3_fixed_window_features'."
         ),
     )
 
@@ -57,8 +60,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    if args.symbol != "BTCUSDT":
-        raise ValueError("Protocol violation: symbol must remain BTCUSDT.")
+    validate_protocol_symbol(args.symbol)
     
     start_str = parse_date(args.start).strftime("%Y-%m-%d")
     end_str = parse_date(args.end).strftime("%Y-%m-%d")
@@ -73,30 +75,30 @@ def main() -> None:
         end_str,
         args.artifact_tag,
     )
-    dataset_path = processed_dir / f"{dataset_stem}.parquet"
-
-    if not dataset_path.exists():
-        raise FileNotFoundError(f"Missing model dataset: {dataset_path}")
+    location = resolve_model_dataset(processed_dir, dataset_stem)
     
     print("=" * 80)
     print("STEP 8: DATASET FREEZE + TARGET DIAGNOSTICS")
     print("=" * 80)
 
-    print(f"Reading model dataset: {dataset_path}")
-    data = pd.read_parquet(dataset_path)
+    print(f"Reading model dataset metadata from: {location.path}")
+    diagnostics, split_summary, total_rows = streaming_target_diagnostics(
+        location,
+    )
+    dataset_hash = model_dataset_sha256(location)
 
     print()
     print("Dataset summary:")
-    print(f"Rows: {len(data):,}")
-    print(f"Timestamp range: {data['timestamp'].min()} → {data['timestamp'].max()}")
-    print()
-    print(data.groupby("split")[["feature_complete", "is_boundary_drop", "model_eligible"]].sum())
+    print(f"Rows: {total_rows:,}")
+    print(split_summary.to_string(index=False))
 
     print()
     print("Building dataset manifest...")
-    manifest = build_dataset_manifest(
-        data=data,
-        dataset_path=dataset_path,
+    manifest = build_streaming_dataset_manifest(
+        split_summary=split_summary,
+        total_rows=total_rows,
+        dataset_path=location.path,
+        dataset_sha256=dataset_hash,
         start=start_str,
         end=end_str,
         symbol=args.symbol,
@@ -114,8 +116,6 @@ def main() -> None:
 
     print()
     print("Computing target diagnostics on model-eligible rows...")
-    diagnostics = target_diagnostics_by_split(data, eligible_only=True)
-
     diagnostics_stem = tagged_artifact_stem(
         "target_diagnostics",
         args.symbol,
